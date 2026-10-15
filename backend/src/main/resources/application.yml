@@ -1,0 +1,54 @@
+server:
+  port: 18090
+
+spring:
+  application:
+    name: ontology-backend-embedded
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 200MB
+  # WP embeds mongo-java-driver 3.x and owns its MongoClient via Dagger.
+  # Disable Boot's Mongo auto-config (expects driver 4.x APIs).
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.mongo.MongoAutoConfiguration
+      - org.springframework.boot.autoconfigure.mongo.MongoReactiveAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.mongo.MongoDataAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.mongo.MongoRepositoriesAutoConfiguration
+      - org.springframework.boot.actuate.autoconfigure.metrics.mongo.MongoMetricsAutoConfiguration
+      - org.springframework.boot.actuate.autoconfigure.mongo.MongoHealthContributorAutoConfiguration
+      - org.springframework.boot.actuate.autoconfigure.mongo.MongoReactiveHealthContributorAutoConfiguration
+
+# Embedded WebProtege via Maven: edu.stanford.protege:webprotege-server-core (+ server:classes)
+webprotege:
+  mode: embedded
+  data-directory: D:/benti2/webprotege-master/.protegedata/protege
+  mongodb-host: localhost
+  mongodb-port: 27017
+  # used only when mode=remote (fallback)
+  base-url: http://localhost:5000
+  api-key: wp-test-swrl-verify-key-20260923
+  connect-timeout-ms: 10000
+  read-timeout-ms: 300000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  metrics:
+    mongo:
+      command.enabled: false
+      connectionpool.enabled: false
+
+# Optional Python worker for PDF parse + extract (doc-intel-worker on :18100)
+doc-intel:
+  worker-url: http://127.0.0.1:18100
+  connect-timeout-ms: 3000
+  read-timeout-ms: 180000
+
+logging:
+  level:
+    com.benti.ontology: INFO
+    edu.stanford.bmir.protege: INFO

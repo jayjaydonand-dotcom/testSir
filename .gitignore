@@ -1,0 +1,14 @@
+backend/target/
+backend/logs/
+backend/logsdir_IS_UNDEFINED/
+backend/lib/
+backend/wp-lib/
+backend/wp-classes/
+_runtime-cache/
+scripts/generated/
+frontend/node_modules/
+frontend/dist/
+_*.json
+*.log
+.idea/
+.vscode/

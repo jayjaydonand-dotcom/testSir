@@ -1,0 +1,1 @@
+AnnotationAssertion(rdfs:label <http://example.org/simulation-tbox#mover_f35> "F-35 空中运动系统")
