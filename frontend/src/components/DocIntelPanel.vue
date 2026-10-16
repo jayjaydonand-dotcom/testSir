@@ -183,27 +183,31 @@
                 <h2>{{ activeNode.label }}</h2>
                 <p class="detail-iri" v-if="activeNode.iri"><code>{{ activeNode.iri }}</code></p>
 
-                <!-- 属性级变更：改了什么、原值/新值、依据 -->
-                <div class="detail-block" v-if="activeFieldDiffs.length">
-                  <h3>{{ activeNode.change === 'modify' ? '修改了哪些属性' : (activeNode.change === 'add' ? '将写入的属性' : '将删除的属性') }}</h3>
-                  <table class="diff-table">
+                <!-- 属性级变更：改了什么、原值→新值、依据 -->
+                <div
+                  class="detail-block"
+                  v-if="activeNode.change && activeNode.change !== 'stable'"
+                >
+                  <h3>{{ diffSectionTitle }}</h3>
+                  <table class="diff-table" v-if="activeFieldDiffs.length">
                     <thead>
                       <tr>
-                        <th>属性</th>
-                        <th>原值</th>
-                        <th>新值</th>
-                        <th>依据（文档摘录）</th>
+                        <th style="width:16%">属性</th>
+                        <th style="width:26%">原值</th>
+                        <th style="width:26%">新值</th>
+                        <th>依据</th>
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="(d, i) in activeFieldDiffs" :key="d.field + '-' + i">
+                      <tr v-for="(d, i) in activeFieldDiffs" :key="(d.field || '') + '-' + i">
                         <td class="diff-field">{{ d.fieldLabel || d.field }}</td>
-                        <td class="diff-before">{{ d.before }}</td>
-                        <td class="diff-after">{{ d.after }}</td>
-                        <td class="diff-basis">{{ d.basis }}</td>
+                        <td class="diff-before">{{ d.before || '（空）' }}</td>
+                        <td class="diff-after">{{ d.after || '（空）' }}</td>
+                        <td class="diff-basis">{{ d.basis || '—' }}</td>
                       </tr>
                     </tbody>
                   </table>
+                  <p v-else class="diff-fallback">暂无字段对照，请查看下方证据或刷新树。</p>
                 </div>
 
                 <div class="detail-block" v-if="activeEvidence.length">
@@ -216,7 +220,7 @@
                   </ul>
                 </div>
 
-                <div class="detail-block" v-if="!activeFieldDiffs.length && !activeNode.change">
+                <div class="detail-block" v-if="!activeNode.change || activeNode.change === 'stable'">
                   <h3>当前定义</h3>
                   <p>{{ activeNode.definition || '暂无定义' }}</p>
                   <ul class="detail-meta" v-if="activeNode.parentLabel">
@@ -312,18 +316,12 @@ const activeChange = computed(() => {
   return (structureChanges.value || []).find((c) => c.candidateId === cid) || null
 })
 
-const activeFieldDiffs = computed(() => {
-  const fromNode = activeNode.value?.fieldDiffs
-  if (Array.isArray(fromNode) && fromNode.length) return fromNode
-  const fromCh = activeChange.value?.fieldDiffs
-  return Array.isArray(fromCh) ? fromCh : []
-})
-
-const activeEvidence = computed(() => {
-  const fromNode = activeNode.value?.evidence
-  if (Array.isArray(fromNode) && fromNode.length) return fromNode
-  const fromCh = activeChange.value?.evidence
-  return Array.isArray(fromCh) ? fromCh : []
+const diffSectionTitle = computed(() => {
+  const c = activeNode.value?.change
+  if (c === 'modify') return '修改了哪些属性'
+  if (c === 'add') return '将写入的属性'
+  if (c === 'delete') return '将删除的属性'
+  return '属性对照'
 })
 
 const activeCand = computed(() => {
@@ -331,6 +329,65 @@ const activeCand = computed(() => {
   if (!cid) return null
   return data.candidates.find((c) => c.id === cid) || null
 })
+
+const activeEvidence = computed(() => {
+  const fromNode = activeNode.value?.evidence
+  if (Array.isArray(fromNode) && fromNode.length) return fromNode
+  const fromCh = activeChange.value?.evidence
+  if (Array.isArray(fromCh) && fromCh.length) return fromCh
+  const cid = activeNode.value?.candidateId
+  if (!cid) return []
+  return (evidenceList.value || []).filter((e) => e.candidateId === cid)
+})
+
+const activeFieldDiffs = computed(() => {
+  const fromNode = activeNode.value?.fieldDiffs
+  if (Array.isArray(fromNode) && fromNode.length) return fromNode
+  const fromCh = activeChange.value?.fieldDiffs
+  if (Array.isArray(fromCh) && fromCh.length) return fromCh
+  return synthesizeFieldDiffs(
+    activeNode.value,
+    activeCand.value,
+    activeChange.value,
+    activeEvidence.value
+  )
+})
+
+function synthesizeFieldDiffs(node, cand, change, evidence) {
+  if (!node || !node.change || node.change === 'stable') return []
+  const c = cand || change || {}
+  const basis = (evidence && evidence[0] && evidence[0].excerpt) || '文档抽取候选'
+  const rows = []
+  const push = (field, fieldLabel, before, after) => {
+    const b = String(before ?? '').trim()
+    const a = String(after ?? '').trim()
+    if (b === a && node.change === 'modify') return
+    if (!a && !b && node.change === 'add') return
+    rows.push({
+      field,
+      fieldLabel,
+      before: node.change === 'add' ? '（空）' : (b || '（空）'),
+      after: node.change === 'delete' ? '（删除）' : (a || '（空）'),
+      basis
+    })
+  }
+  if (node.change === 'modify') {
+    push('label', '名称', node.label, c.label || node.label)
+    push('definition', '定义', node.definition, c.definition)
+    push('parentLabel', '所属父类/元模型', node.parentLabel, c.parentLabel || node.parentLabel)
+    if (c.rangeHint) push('rangeHint', '值域/单位提示', '', c.rangeHint)
+  } else if (node.change === 'add') {
+    push('label', '名称', '', c.label || node.label)
+    push('definition', '定义', '', c.definition || node.definition)
+    push('parentLabel', '所属父类/元模型', '', c.parentLabel || node.parentLabel)
+    const role = (c.uiRole || node.uiRole || (node.kind === 'Model' ? 'model' : 'metamodel'))
+    push('uiRole', '类别（元模型/模型）', '', role === 'model' ? '模型' : '元模型')
+  } else if (node.change === 'delete') {
+    push('label', '名称', node.label, '（删除）')
+    push('definition', '定义', node.definition || c.definition, '（删除）')
+  }
+  return rows
+}
 
 function toggleChangeSelect(id) {
   if (!id) return
@@ -340,12 +397,28 @@ function toggleChangeSelect(id) {
 }
 
 function onActivateNode(node) {
-  activeNode.value = node
+  // Merge fieldDiffs/evidence from structureChanges so detail never loses对照
+  const cid = node?.candidateId
+  const ch = cid ? (structureChanges.value || []).find((x) => x.candidateId === cid) : null
+  activeNode.value = ch
+    ? {
+        ...node,
+        fieldDiffs: (Array.isArray(node.fieldDiffs) && node.fieldDiffs.length)
+          ? node.fieldDiffs
+          : (ch.fieldDiffs || []),
+        evidence: (Array.isArray(node.evidence) && node.evidence.length)
+          ? node.evidence
+          : (ch.evidence || []),
+        change: node.change || ch.change,
+        definition: node.definition || ch.definition,
+        parentLabel: node.parentLabel || ch.parentLabel
+      }
+    : node
   activeNodeId.value = node?.id || ''
-  if (node?.candidateId) {
-    const cand = data.candidates.find((c) => c.id === node.candidateId)
+  if (cid) {
+    const cand = data.candidates.find((c) => c.id === cid)
     if (cand) selectCandidate(cand)
-    else selectedId.value = node.candidateId
+    else selectedId.value = cid
   }
 }
 
@@ -583,7 +656,7 @@ async function seedDemo() {
     applySnapshot((await api.seedDocIntelDemo(props.projectId)) || {})
     activeTab.value = 'review'
     await loadStructureReview()
-    showToast('演示抽取完成，请在结构树中审核变更。', true)
+    showToast('示范案例已写入：请在「元模型管理 / 模型管理」查看增删改，点修改项看属性对照。', true)
   } catch (e) {
     error.value = e.message || String(e)
   } finally {
@@ -980,6 +1053,11 @@ watch(activeTab, (tab) => {
 .diff-before { color: #94a3b8; width: 22%; word-break: break-word; }
 .diff-after { color: #0f172a; width: 22%; word-break: break-word; font-weight: 500; }
 .diff-basis { color: #475569; font-size: 12px; word-break: break-word; }
+.diff-fallback {
+  margin: 0;
+  font-size: 13px;
+  color: #94a3b8;
+}
 .ev-list {
   list-style: none;
   margin: 0;
