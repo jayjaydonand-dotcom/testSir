@@ -379,19 +379,25 @@ public class DocIntelService {
     }
 
     /**
-     * Current metamodel tree + pending candidate overlays (add/modify/delete)
-     * for the structure-diff review UI.
+     * Full metamodel + model inventory with pending add/modify/delete overlays
+     * for structure review (mirrors 元模型管理 + 模型管理).
      */
     @SuppressWarnings("unchecked")
     public Map<String, Object> structureReview(String projectId) throws Exception {
         Map<String, Object> store = normalize(projectId, readJson(storePath(projectId)));
         List<Map<String, Object>> candidates = listOf(store.get("candidates"));
+        List<Map<String, Object>> evidenceAll = listOf(store.get("evidence"));
         List<Map<String, Object>> tree = contextPack.buildClassTree(projectId);
         Map<String, Object> pack = contextPack.build(projectId);
+
+        Map<String, Map<String, Object>> entityByIri = new LinkedHashMap<>();
         Map<String, String> labelToIri = new LinkedHashMap<>();
         for (Map<String, Object> c : listOf(pack.get("classes"))) {
             String label = String.valueOf(c.getOrDefault("label", "")).trim();
             String iri = String.valueOf(c.getOrDefault("iri", "")).trim();
+            if (!iri.isBlank()) {
+                entityByIri.put(iri, c);
+            }
             if (!label.isBlank() && !iri.isBlank()) {
                 labelToIri.putIfAbsent(label, iri);
             }
@@ -399,6 +405,9 @@ public class DocIntelService {
         for (Map<String, Object> p : listOf(pack.get("properties"))) {
             String label = String.valueOf(p.getOrDefault("label", "")).trim();
             String iri = String.valueOf(p.getOrDefault("iri", "")).trim();
+            if (!iri.isBlank()) {
+                entityByIri.put(iri, p);
+            }
             if (!label.isBlank() && !iri.isBlank()) {
                 labelToIri.putIfAbsent(label, iri);
             }
@@ -424,8 +433,12 @@ public class DocIntelService {
             String changeType;
             if ("delete".equals(action) || "Delete".equals(kind)) {
                 changeType = "delete";
-            } else if ("reuse".equals(action) || (!existingIri.isBlank() && labelToIri.containsValue(existingIri))
-                    || labelToIri.containsKey(label)) {
+            } else if ("create".equals(action)) {
+                // Explicit create stays「新增」, even if a same-label class already exists
+                changeType = "add";
+            } else if ("reuse".equals(action)
+                    || (!existingIri.isBlank() && entityByIri.containsKey(existingIri))
+                    || (action.isBlank() && labelToIri.containsKey(label))) {
                 changeType = "modify";
                 if (existingIri.isBlank()) {
                     existingIri = labelToIri.getOrDefault(label, "");
@@ -434,12 +447,26 @@ public class DocIntelService {
                 changeType = "add";
             }
 
-            Map<String, Object> ch = new LinkedHashMap<>();
-            ch.put("candidateId", cand.get("id"));
             boolean asModel = isModelCandidate(cand);
             String displayKind = asModel ? "Model" : kind;
+            List<Map<String, Object>> evidence = evidenceForCandidate(evidenceAll, String.valueOf(cand.get("id")));
+            List<Map<String, Object>> fieldDiffs = List.of();
+            if ("modify".equals(changeType)) {
+                Map<String, Object> existing = !existingIri.isBlank()
+                        ? entityByIri.get(existingIri)
+                        : entityByIri.get(labelToIri.getOrDefault(label, ""));
+                fieldDiffs = buildFieldDiffs(existing, cand, evidence);
+            } else if ("add".equals(changeType)) {
+                fieldDiffs = buildAddFieldPreview(cand, evidence);
+            } else if ("delete".equals(changeType)) {
+                Map<String, Object> existing = entityByIri.get(existingIri);
+                fieldDiffs = buildDeleteFieldPreview(existing != null ? existing : cand, evidence);
+            }
+
+            Map<String, Object> ch = new LinkedHashMap<>();
+            ch.put("candidateId", cand.get("id"));
             ch.put("kind", displayKind);
-            ch.put("uiRole", asModel ? "model" : cand.getOrDefault("uiRole", ""));
+            ch.put("uiRole", asModel ? "model" : String.valueOf(cand.getOrDefault("uiRole", "metamodel")));
             ch.put("label", label);
             ch.put("change", changeType);
             ch.put("definition", cand.getOrDefault("definition", ""));
@@ -447,21 +474,64 @@ public class DocIntelService {
             ch.put("parentIri", parentIri);
             ch.put("existingIri", existingIri);
             ch.put("action", action.isBlank() ? ("modify".equals(changeType) ? "reuse" : "create") : action);
+            ch.put("fieldDiffs", fieldDiffs);
+            ch.put("evidence", evidence);
             changes.add(ch);
 
-            // Overlay onto tree
             if ("modify".equals(changeType) || "delete".equals(changeType)) {
                 String targetIri = !existingIri.isBlank() ? existingIri : labelToIri.get(label);
-                markTreeNode(tree, targetIri, label, changeType, cand);
+                markTreeNode(tree, targetIri, label, changeType, cand, fieldDiffs, evidence);
             } else {
-                insertAddNode(tree, cand, parentIri, parentLabel, changeType, asModel);
+                insertAddNode(tree, cand, parentIri, parentLabel, changeType, asModel, fieldDiffs, evidence);
             }
+        }
+
+        List<Map<String, Object>> models = flattenModelNodes(tree);
+        // Ensure pending model changes appear even if tree overlay missed them
+        Map<String, Map<String, Object>> modelsByKey = new LinkedHashMap<>();
+        for (Map<String, Object> m : models) {
+            String key = String.valueOf(m.getOrDefault("candidateId", m.getOrDefault("iri", m.get("id"))));
+            modelsByKey.put(key, m);
+        }
+        for (Map<String, Object> ch : changes) {
+            boolean isModelCh = "Model".equals(String.valueOf(ch.get("kind")))
+                    || "model".equals(String.valueOf(ch.get("uiRole")));
+            if (!isModelCh) {
+                continue;
+            }
+            String key = String.valueOf(ch.getOrDefault("candidateId", ch.get("label")));
+            if (modelsByKey.containsKey(key)) {
+                continue;
+            }
+            boolean already = models.stream().anyMatch(m ->
+                    String.valueOf(m.get("label")).equals(String.valueOf(ch.get("label")))
+                            && String.valueOf(m.getOrDefault("candidateId", "")).equals(String.valueOf(ch.get("candidateId"))));
+            if (already) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", "pending:" + ch.get("candidateId"));
+            row.put("iri", ch.getOrDefault("existingIri", ""));
+            row.put("label", ch.get("label"));
+            row.put("kind", "Model");
+            row.put("uiRole", "model");
+            row.put("change", ch.get("change"));
+            row.put("candidateId", ch.get("candidateId"));
+            row.put("definition", ch.get("definition"));
+            row.put("parentLabel", ch.get("parentLabel"));
+            row.put("parentIri", ch.get("parentIri"));
+            row.put("fieldDiffs", ch.get("fieldDiffs"));
+            row.put("evidence", ch.get("evidence"));
+            row.put("children", List.of());
+            models.add(row);
+            modelsByKey.put(key, row);
         }
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", true);
         out.put("projectId", projectId);
         out.put("tree", tree);
+        out.put("models", models);
         out.put("changes", changes);
         out.put("pendingCount", pendingOnly.size());
         Map<String, Integer> byType = new LinkedHashMap<>();
@@ -477,41 +547,227 @@ public class DocIntelService {
         return out;
     }
 
+    private static List<Map<String, Object>> evidenceForCandidate(List<Map<String, Object>> all, String candidateId) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (candidateId == null || candidateId.isBlank()) {
+            return out;
+        }
+        for (Map<String, Object> e : all) {
+            if (candidateId.equals(String.valueOf(e.get("candidateId")))) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", e.get("id"));
+                row.put("excerpt", e.getOrDefault("excerpt", ""));
+                row.put("page", e.getOrDefault("page", ""));
+                row.put("docId", e.getOrDefault("docId", ""));
+                row.put("chunkId", e.getOrDefault("chunkId", ""));
+                out.add(row);
+            }
+        }
+        return out;
+    }
+
+    private static String evidenceBasis(List<Map<String, Object>> evidence) {
+        if (evidence == null || evidence.isEmpty()) {
+            return "文档抽取候选（无摘录）";
+        }
+        StringBuilder sb = new StringBuilder();
+        int i = 0;
+        for (Map<String, Object> e : evidence) {
+            if (i >= 2) {
+                break;
+            }
+            String excerpt = String.valueOf(e.getOrDefault("excerpt", "")).trim();
+            Object page = e.get("page");
+            if (!excerpt.isBlank()) {
+                if (sb.length() > 0) {
+                    sb.append("；");
+                }
+                if (page != null && !String.valueOf(page).isBlank()) {
+                    sb.append("p.").append(page).append(" ");
+                }
+                sb.append(excerpt.length() > 120 ? excerpt.substring(0, 120) + "…" : excerpt);
+                i++;
+            }
+        }
+        return sb.length() == 0 ? "文档抽取候选（无摘录）" : sb.toString();
+    }
+
+    private static String firstNonBlank(Object... values) {
+        if (values == null) {
+            return "";
+        }
+        for (Object v : values) {
+            if (v == null) {
+                continue;
+            }
+            String s = String.valueOf(v).trim();
+            if (!s.isBlank() && !"null".equals(s)) {
+                return s;
+            }
+        }
+        return "";
+    }
+
+    private static void addFieldDiff(List<Map<String, Object>> diffs, String field, String fieldLabel,
+                                     String before, String after, String basis) {
+        String b = before == null ? "" : before.trim();
+        String a = after == null ? "" : after.trim();
+        if (b.equals(a)) {
+            return;
+        }
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("field", field);
+        row.put("fieldLabel", fieldLabel);
+        row.put("before", b.isBlank() ? "（空）" : b);
+        row.put("after", a.isBlank() ? "（空）" : a);
+        row.put("basis", basis);
+        diffs.add(row);
+    }
+
+    /** Compare existing ontology entity vs candidate for attribute-level modify review. */
+    private static List<Map<String, Object>> buildFieldDiffs(Map<String, Object> existing,
+                                                             Map<String, Object> cand,
+                                                             List<Map<String, Object>> evidence) {
+        List<Map<String, Object>> diffs = new ArrayList<>();
+        String basis = evidenceBasis(evidence);
+        Map<String, Object> ex = existing != null ? existing : Map.of();
+        addFieldDiff(diffs, "label", "名称",
+                String.valueOf(ex.getOrDefault("label", "")),
+                String.valueOf(cand.getOrDefault("label", "")), basis);
+        // Prefer candidate definition; fall back to comment-style keys from pack
+        String beforeDef = firstNonBlank(ex.get("definition"), ex.get("comment"));
+        String afterDef = firstNonBlank(cand.get("definition"), cand.get("comment"));
+        addFieldDiff(diffs, "definition", "定义", beforeDef, afterDef, basis);
+        addFieldDiff(diffs, "parentLabel", "所属父类/元模型",
+                String.valueOf(ex.getOrDefault("parentLabel", "")),
+                String.valueOf(cand.getOrDefault("parentLabel", "")), basis);
+        String beforeRole = String.valueOf(ex.getOrDefault("uiRole",
+                "Model".equals(String.valueOf(ex.get("kind"))) ? "model" : "metamodel"))
+                .trim().toLowerCase(Locale.ROOT);
+        String afterRole = isModelCandidate(cand) ? "model"
+                : String.valueOf(cand.getOrDefault("uiRole",
+                "Model".equals(String.valueOf(cand.get("kind"))) ? "model" : "metamodel"))
+                .trim().toLowerCase(Locale.ROOT);
+        if (!beforeRole.equals(afterRole)) {
+            addFieldDiff(diffs, "uiRole", "类别（元模型/模型）",
+                    "model".equals(beforeRole) ? "模型" : "元模型",
+                    "model".equals(afterRole) ? "模型" : "元模型", basis);
+        }
+        addFieldDiff(diffs, "domainHint", "定义域提示",
+                String.valueOf(ex.getOrDefault("domainHint", "")),
+                String.valueOf(cand.getOrDefault("domainHint", "")), basis);
+        addFieldDiff(diffs, "rangeHint", "值域/单位提示",
+                String.valueOf(ex.getOrDefault("rangeHint", "")),
+                String.valueOf(cand.getOrDefault("rangeHint", "")), basis);
+        if (diffs.isEmpty()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("field", "match");
+            row.put("fieldLabel", "匹配说明");
+            row.put("before", String.valueOf(ex.getOrDefault("label", cand.getOrDefault("label", ""))));
+            row.put("after", "文档命中已有实体（复用，无字段差异）");
+            row.put("basis", basis);
+            diffs.add(row);
+        }
+        return diffs;
+    }
+
+    private static List<Map<String, Object>> buildAddFieldPreview(Map<String, Object> cand,
+                                                                  List<Map<String, Object>> evidence) {
+        List<Map<String, Object>> diffs = new ArrayList<>();
+        String basis = evidenceBasis(evidence);
+        addFieldDiff(diffs, "label", "名称", "", String.valueOf(cand.getOrDefault("label", "")), basis);
+        addFieldDiff(diffs, "definition", "定义", "", String.valueOf(cand.getOrDefault("definition", "")), basis);
+        addFieldDiff(diffs, "parentLabel", "所属父类/元模型", "",
+                String.valueOf(cand.getOrDefault("parentLabel", "")), basis);
+        String role = isModelCandidate(cand) ? "模型" : "元模型";
+        addFieldDiff(diffs, "uiRole", "类别（元模型/模型）", "", role, basis);
+        addFieldDiff(diffs, "domainHint", "定义域提示", "",
+                String.valueOf(cand.getOrDefault("domainHint", "")), basis);
+        addFieldDiff(diffs, "rangeHint", "值域/单位提示", "",
+                String.valueOf(cand.getOrDefault("rangeHint", "")), basis);
+        return diffs;
+    }
+
+    private static List<Map<String, Object>> buildDeleteFieldPreview(Map<String, Object> entity,
+                                                                     List<Map<String, Object>> evidence) {
+        List<Map<String, Object>> diffs = new ArrayList<>();
+        String basis = evidenceBasis(evidence);
+        addFieldDiff(diffs, "label", "名称",
+                String.valueOf(entity.getOrDefault("label", "")), "（删除）", basis);
+        addFieldDiff(diffs, "definition", "定义",
+                String.valueOf(entity.getOrDefault("definition", "")), "（删除）", basis);
+        return diffs;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> flattenModelNodes(List<Map<String, Object>> nodes) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        flattenModelNodesRec(nodes, out);
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void flattenModelNodesRec(List<Map<String, Object>> nodes, List<Map<String, Object>> out) {
+        if (nodes == null) {
+            return;
+        }
+        for (Map<String, Object> n : nodes) {
+            String id = String.valueOf(n.getOrDefault("id", ""));
+            if ("virtual:proposed-models".equals(id) || isModelNodeMap(n)) {
+                if (isModelNodeMap(n)) {
+                    out.add(n);
+                } else {
+                    flattenModelNodesRec(listOf(n.get("children")), out);
+                }
+            } else {
+                flattenModelNodesRec(listOf(n.get("children")), out);
+            }
+        }
+    }
+
+    private static boolean isModelNodeMap(Map<String, Object> n) {
+        return "Model".equals(String.valueOf(n.getOrDefault("kind", "")))
+                || "model".equals(String.valueOf(n.getOrDefault("uiRole", "")));
+    }
+
     @SuppressWarnings("unchecked")
     private static void markTreeNode(List<Map<String, Object>> nodes, String iri, String label,
-                                     String changeType, Map<String, Object> cand) {
+                                     String changeType, Map<String, Object> cand,
+                                     List<Map<String, Object>> fieldDiffs,
+                                     List<Map<String, Object>> evidence) {
         if (nodes == null) {
             return;
         }
         for (Map<String, Object> n : nodes) {
             String nIri = String.valueOf(n.getOrDefault("iri", ""));
             String nLabel = String.valueOf(n.getOrDefault("label", ""));
+            String nKind = String.valueOf(n.get("kind"));
             boolean hit = (!iri.isBlank() && iri.equals(nIri))
-                    || (!label.isBlank() && label.equals(nLabel) && "Class".equals(String.valueOf(n.get("kind"))));
+                    || (!label.isBlank() && label.equals(nLabel)
+                    && ("Class".equals(nKind) || "Model".equals(nKind)
+                    || "ObjectProperty".equals(nKind) || "DataProperty".equals(nKind)));
             if (hit) {
                 n.put("change", changeType);
                 n.put("candidateId", cand.get("id"));
                 n.put("pendingKind", cand.get("kind"));
                 n.put("definition", cand.getOrDefault("definition", n.get("definition")));
+                n.put("fieldDiffs", fieldDiffs);
+                n.put("evidence", evidence);
                 if (isModelCandidate(cand)) {
                     n.put("kind", "Model");
                     n.put("uiRole", "model");
                 }
                 return;
             }
-            markTreeNode(listOf(n.get("children")), iri, label, changeType, cand);
+            markTreeNode(listOf(n.get("children")), iri, label, changeType, cand, fieldDiffs, evidence);
         }
     }
 
     @SuppressWarnings("unchecked")
     private static void insertAddNode(List<Map<String, Object>> roots, Map<String, Object> cand,
-                                      String parentIri, String parentLabel, String changeType) {
-        insertAddNode(roots, cand, parentIri, parentLabel, changeType, isModelCandidate(cand));
-    }
-
-    private static void insertAddNode(List<Map<String, Object>> roots, Map<String, Object> cand,
                                       String parentIri, String parentLabel, String changeType,
-                                      boolean asModel) {
+                                      boolean asModel, List<Map<String, Object>> fieldDiffs,
+                                      List<Map<String, Object>> evidence) {
         Map<String, Object> node = new LinkedHashMap<>();
         String cid = String.valueOf(cand.get("id"));
         node.put("id", "pending:" + cid);
@@ -524,6 +780,8 @@ public class DocIntelService {
         node.put("definition", cand.getOrDefault("definition", ""));
         node.put("parentIri", parentIri);
         node.put("parentLabel", parentLabel);
+        node.put("fieldDiffs", fieldDiffs);
+        node.put("evidence", evidence);
         node.put("children", new ArrayList<>());
 
         if (!parentIri.isBlank() && attachUnder(roots, parentIri, null, node)) {
@@ -532,9 +790,8 @@ public class DocIntelService {
         if (!parentLabel.isBlank() && attachUnder(roots, null, parentLabel, node)) {
             return;
         }
-        // Bucket for unattached proposals
         String bucketId = asModel ? "virtual:proposed-models" : "virtual:proposed";
-        String bucketLabel = asModel ? "待挂接型号" : "待挂接变更";
+        String bucketLabel = asModel ? "待挂接模型" : "待挂接变更";
         Map<String, Object> bucket = null;
         for (Map<String, Object> r : roots) {
             if (bucketId.equals(String.valueOf(r.get("id")))) {
@@ -710,23 +967,64 @@ public class DocIntelService {
         return out;
     }
 
-    /** Demo without upload: seed a short Chinese spec + candidates. Always refreshes demo doc. */
+    /**
+     * Curated structure-review demo: baseline metamodel+models in OWL, then pending
+     * add/modify/delete candidates with explicit attribute diffs + evidence.
+     * Deterministic (no OntoGPT) so 结构审核 can show clear field-level changes.
+     */
     public Map<String, Object> seedDemo(String projectId) throws Exception {
         Map<String, Object> store = normalize(projectId, readJson(storePath(projectId)));
         String docId = "doc.demo";
 
+        String iriHeli = NS + "C_Helicopter";
+        String iriRotor = NS + "C_MainRotor";
+        String iriTail = NS + "C_TailRotor";
+        String iriMTOW = NS + "DP_MaxTakeoffWeight";
+        String iriTransport = NS + "M_TransportHeli";
+        String iriScout = NS + "M_ScoutHeli";
+
+        // 1) Baseline ontology (元模型 + 模型) so modify/delete have existing targets
+        String baselineOwl = ""
+                + "Ontology(<http://example.org/doc-intel-baseline>\n"
+                + "Declaration(AnnotationProperty(<" + BENTI_UI_ROLE + ">))\n"
+                + "Declaration(Class(<" + iriHeli + ">))\n"
+                + "AnnotationAssertion(rdfs:label <" + iriHeli + "> \"直升机\"@zh)\n"
+                + "AnnotationAssertion(rdfs:comment <" + iriHeli + "> \"以旋翼提供升力的飞行器\"@zh)\n"
+                + "AnnotationAssertion(<" + BENTI_UI_ROLE + "> <" + iriHeli + "> \"metamodel\")\n"
+                + "Declaration(Class(<" + iriRotor + ">))\n"
+                + "AnnotationAssertion(rdfs:label <" + iriRotor + "> \"主旋翼\"@zh)\n"
+                + "AnnotationAssertion(rdfs:comment <" + iriRotor + "> \"提供升力的气动装置\"@zh)\n"
+                + "AnnotationAssertion(<" + BENTI_UI_ROLE + "> <" + iriRotor + "> \"metamodel\")\n"
+                + "Declaration(Class(<" + iriTail + ">))\n"
+                + "AnnotationAssertion(rdfs:label <" + iriTail + "> \"尾桨\"@zh)\n"
+                + "AnnotationAssertion(rdfs:comment <" + iriTail + "> \"抗扭与航向控制装置\"@zh)\n"
+                + "AnnotationAssertion(<" + BENTI_UI_ROLE + "> <" + iriTail + "> \"metamodel\")\n"
+                + "Declaration(DataProperty(<" + iriMTOW + ">))\n"
+                + "AnnotationAssertion(rdfs:label <" + iriMTOW + "> \"最大起飞重量\"@zh)\n"
+                + "AnnotationAssertion(rdfs:comment <" + iriMTOW + "> \"允许起飞的最大重量\"@zh)\n"
+                + "Declaration(Class(<" + iriTransport + ">))\n"
+                + "AnnotationAssertion(rdfs:label <" + iriTransport + "> \"运输直升机\"@zh)\n"
+                + "AnnotationAssertion(rdfs:comment <" + iriTransport + "> \"用于人员和物资运输的直升机\"@zh)\n"
+                + "AnnotationAssertion(<" + BENTI_UI_ROLE + "> <" + iriTransport + "> \"model\")\n"
+                + "SubClassOf(<" + iriTransport + "> <" + iriHeli + ">)\n"
+                + "Declaration(Class(<" + iriScout + ">))\n"
+                + "AnnotationAssertion(rdfs:label <" + iriScout + "> \"侦察直升机\"@zh)\n"
+                + "AnnotationAssertion(rdfs:comment <" + iriScout + "> \"用于战场侦察的轻型直升机\"@zh)\n"
+                + "AnnotationAssertion(<" + BENTI_UI_ROLE + "> <" + iriScout + "> \"model\")\n"
+                + "SubClassOf(<" + iriScout + "> <" + iriHeli + ">)\n"
+                + ")";
+        ontology.addAxioms(projectId, "doc-intel seed baseline metamodel+models", baselineOwl);
+
         String sample = ""
-                + "# 旋翼平台论证摘录（示范）\n\n"
-                + "直升机是一种以旋翼提供升力的飞行器。\n"
-                + "武装直升机属于直升机的一种。\n"
+                + "# 旋翼平台论证摘录（结构审核示范）\n\n"
+                + "【元模型·修改】直升机是一种以旋翼系统提供升力与部分推进力的垂直起降飞行器，用于运输、攻击与特种作战。\n"
+                + "【元模型·新增】动力系统是为旋翼与尾桨提供功率的成套装置。\n"
+                + "【元模型·属性修改】最大起飞重量指航空器允许起飞的最大重量，单位为千克（kg）。\n"
+                + "【模型·新增】武装直升机属于直升机，是配备对地/对空武器系统的作战型号。\n"
+                + "【模型·修改】运输直升机是以人员和物资运输为主要任务的直升机型号，强调舱容与外吊能力。\n"
+                + "【模型·删除】论证结论建议不再保留「侦察直升机」作为独立型号条目，其能力并入多用途型号。\n"
                 + "主旋翼是提供升力和部分推进的气动装置。\n"
-                + "尾桨是用于抗扭与航向控制的装置。\n"
-                + "最大起飞重量指允许起飞的最大重量。\n"
-                + "最大起飞重量的单位是千克。\n"
-                + "续航时间是在规定任务剖面下可持续飞行的时间。\n"
-                + "任务载荷是可装载的任务设备与物资质量。\n"
-                + "主旋翼安装于机身。\n"
-                + "尾桨安装于机尾。\n";
+                + "尾桨是用于抗扭与航向控制的装置。\n";
 
         Path fileDir = filesRoot(projectId).resolve(docId);
         Files.createDirectories(fileDir);
@@ -739,23 +1037,166 @@ public class DocIntelService {
         meta.put("storedPath", stored.toString());
         meta.put("size", (long) sample.getBytes(StandardCharsets.UTF_8).length);
         meta.put("contentType", "text/markdown");
-        meta.put("status", "uploaded");
+        meta.put("status", "ready");
         meta.put("createdAt", System.currentTimeMillis());
-        meta.put("note", "内置演示文档");
+        meta.put("note", "结构审核示范：含元模型与模型的增删改");
+        meta.put("engine", "curated-demo");
 
-        // replace demo doc if reseed
+        List<Map<String, Object>> chunks = chunkText(docId, sample);
+        List<Map<String, Object>> candidates = new ArrayList<>();
+        List<Map<String, Object>> evidence = new ArrayList<>();
+
+        // --- 元模型：修改直升机定义 ---
+        addCuratedCandidate(candidates, evidence, docId, chunks,
+                "Class", "直升机",
+                "以旋翼系统提供升力与部分推进力的垂直起降飞行器，用于运输、攻击与特种作战",
+                null, iriHeli, "reuse", "metamodel",
+                "直升机是一种以旋翼系统提供升力与部分推进力的垂直起降飞行器，用于运输、攻击与特种作战。", 1);
+
+        // --- 元模型：新增动力系统 ---
+        addCuratedCandidate(candidates, evidence, docId, chunks,
+                "Class", "动力系统",
+                "为旋翼与尾桨提供功率的成套装置",
+                null, null, "create", "metamodel",
+                "动力系统是为旋翼与尾桨提供功率的成套装置。", 1);
+
+        // --- 元模型属性：修改最大起飞重量定义+单位 ---
+        Map<String, Object> mtow = addCuratedCandidate(candidates, evidence, docId, chunks,
+                "DataProperty", "最大起飞重量",
+                "航空器允许起飞的最大重量",
+                null, iriMTOW, "reuse", null,
+                "最大起飞重量指航空器允许起飞的最大重量，单位为千克（kg）。", 1);
+        mtow.put("rangeHint", "千克(kg)");
+
+        // --- 模型：新增武装直升机 ---
+        addCuratedCandidate(candidates, evidence, docId, chunks,
+                "Model", "武装直升机",
+                "配备对地/对空武器系统的作战型号",
+                "直升机", null, "create", "model",
+                "武装直升机属于直升机，是配备对地/对空武器系统的作战型号。", 1)
+                .put("parentIri", iriHeli);
+
+        // --- 模型：修改运输直升机定义 ---
+        addCuratedCandidate(candidates, evidence, docId, chunks,
+                "Model", "运输直升机",
+                "以人员和物资运输为主要任务的直升机型号，强调舱容与外吊能力",
+                "直升机", iriTransport, "reuse", "model",
+                "运输直升机是以人员和物资运输为主要任务的直升机型号，强调舱容与外吊能力。", 1)
+                .put("parentIri", iriHeli);
+
+        // --- 模型：删除侦察直升机 ---
+        addCuratedCandidate(candidates, evidence, docId, chunks,
+                "Model", "侦察直升机",
+                "用于战场侦察的轻型直升机",
+                "直升机", iriScout, "delete", "model",
+                "论证结论建议不再保留「侦察直升机」作为独立型号条目，其能力并入多用途型号。", 1)
+                .put("parentIri", iriHeli);
+
         List<Map<String, Object>> docs = listOf(store.get("docs"));
         docs.removeIf(d -> docId.equals(String.valueOf(d.get("id"))));
         docs.add(0, meta);
         store.put("docs", docs);
-        // clear previous demo artefacts
-        store.put("chunks", filterOutDoc(listOf(store.get("chunks")), docId));
-        store.put("candidates", filterOutDoc(listOf(store.get("candidates")), docId));
-        store.put("evidence", filterOutDoc(listOf(store.get("evidence")), docId));
-        store.put("jobs", filterOutDoc(listOf(store.get("jobs")), docId));
-        writeJson(storePath(projectId), store);
+        List<Map<String, Object>> nextChunks = filterOutDoc(listOf(store.get("chunks")), docId);
+        nextChunks.addAll(0, chunks);
+        store.put("chunks", nextChunks);
+        // Wipe ALL pending candidates so old OntoGPT noise cannot hide model CRUD demo
+        List<Map<String, Object>> nextCand = new ArrayList<>();
+        for (Map<String, Object> c : listOf(store.get("candidates"))) {
+            if (!"pending".equals(String.valueOf(c.get("status")))) {
+                nextCand.add(c);
+            }
+        }
+        nextCand.addAll(0, candidates);
+        store.put("candidates", nextCand);
+        List<Map<String, Object>> nextEv = new ArrayList<>();
+        for (Map<String, Object> e : listOf(store.get("evidence"))) {
+            String cid = String.valueOf(e.getOrDefault("candidateId", ""));
+            boolean keep = false;
+            for (Map<String, Object> c : nextCand) {
+                if (cid.equals(String.valueOf(c.get("id"))) && !"pending".equals(String.valueOf(c.get("status")))) {
+                    keep = true;
+                    break;
+                }
+            }
+            if (keep && !docId.equals(String.valueOf(e.get("docId")))) {
+                nextEv.add(e);
+            }
+        }
+        nextEv.addAll(0, evidence);
+        store.put("evidence", nextEv);
 
-        return startJob(projectId, docId);
+        String jobId = "job.demo." + System.currentTimeMillis();
+        Map<String, Object> job = new LinkedHashMap<>();
+        job.put("id", jobId);
+        job.put("docId", docId);
+        job.put("status", "done");
+        job.put("engine", "curated-demo");
+        job.put("createdAt", System.currentTimeMillis());
+        job.put("updatedAt", System.currentTimeMillis());
+        job.put("chunkCount", chunks.size());
+        job.put("candidateCount", candidates.size());
+        job.put("message", "结构审核示范已就绪：元模型 修改/新增/属性修改；模型 新增/修改/删除");
+        List<Map<String, Object>> jobs = listOf(store.get("jobs"));
+        jobs.removeIf(j -> docId.equals(String.valueOf(j.get("docId"))));
+        jobs.add(0, job);
+        store.put("jobs", jobs);
+        meta.put("latestJobId", jobId);
+
+        writeJson(storePath(projectId), normalize(projectId, store));
+
+        Map<String, Object> out = snapshot(projectId);
+        out.put("ok", true);
+        out.put("job", job);
+        out.put("engine", "curated-demo");
+        out.put("structureReview", structureReview(projectId));
+        out.put("message", String.valueOf(job.get("message")));
+        return out;
+    }
+
+    /** Helper: append curated candidate + evidence; returns the candidate map for extra fields. */
+    private Map<String, Object> addCuratedCandidate(List<Map<String, Object>> candidates,
+                                                    List<Map<String, Object>> evidence,
+                                                    String docId,
+                                                    List<Map<String, Object>> chunks,
+                                                    String kind, String label, String definition,
+                                                    String parentLabel, String existingIri,
+                                                    String action, String uiRole,
+                                                    String excerpt, int page) {
+        String candId = "cand.demo." + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        String chunkId = chunks.isEmpty() ? "" : String.valueOf(chunks.get(0).get("id"));
+        Map<String, Object> cand = new LinkedHashMap<>();
+        cand.put("id", candId);
+        cand.put("docId", docId);
+        cand.put("kind", kind);
+        cand.put("label", label);
+        cand.put("definition", definition);
+        cand.put("status", "pending");
+        cand.put("action", action);
+        cand.put("chunkIds", chunkId.isBlank() ? List.of() : List.of(chunkId));
+        cand.put("engine", "curated-demo");
+        cand.put("createdAt", System.currentTimeMillis());
+        if (parentLabel != null && !parentLabel.isBlank()) {
+            cand.put("parentLabel", parentLabel);
+        }
+        if (existingIri != null && !existingIri.isBlank()) {
+            cand.put("existingIri", existingIri);
+        }
+        if (uiRole != null && !uiRole.isBlank()) {
+            cand.put("uiRole", uiRole);
+            cand.put("role", uiRole);
+        }
+        candidates.add(cand);
+
+        Map<String, Object> ev = new LinkedHashMap<>();
+        ev.put("id", "ev." + candId.substring(5));
+        ev.put("candidateId", candId);
+        ev.put("docId", docId);
+        ev.put("chunkId", chunkId);
+        ev.put("page", page);
+        String ex = excerpt == null ? "" : excerpt;
+        ev.put("excerpt", ex.length() > 200 ? ex.substring(0, 200) + "…" : ex);
+        evidence.add(ev);
+        return cand;
     }
 
     @SuppressWarnings("unchecked")

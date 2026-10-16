@@ -22,6 +22,9 @@ public class OntologyContextPack {
     private static final Pattern LABEL_ASSERT = Pattern.compile(
             "AnnotationAssertion\\([^\\s]*rdfs:label\\s+<([^>]+)>\\s+\\\"([^\\\"]+)\\\"",
             Pattern.CASE_INSENSITIVE);
+    private static final Pattern COMMENT_ASSERT = Pattern.compile(
+            "AnnotationAssertion\\([^\\s]*rdfs:comment\\s+<([^>]+)>\\s+\\\"([^\\\"]+)\\\"",
+            Pattern.CASE_INSENSITIVE);
     /** AnnotationAssertion(<...#uiRole> <classIri> "model"|"metamodel") — full or prefixed. */
     private static final Pattern UI_ROLE_ASSERT = Pattern.compile(
             "AnnotationAssertion\\([^\\s]*uiRole\\s+<([^>]+)>\\s+\\\"([^\\\"]+)\\\"",
@@ -53,6 +56,7 @@ public class OntologyContextPack {
                     ? (List<String>) snap.get("axioms")
                     : List.of();
             Map<String, String> iriToLabel = new LinkedHashMap<>();
+            Map<String, String> iriToComment = new LinkedHashMap<>();
             Map<String, String> childToParent = new LinkedHashMap<>();
             Map<String, String> iriToRole = new LinkedHashMap<>();
             Set<String> classIris = new LinkedHashSet<>();
@@ -79,6 +83,10 @@ public class OntologyContextPack {
                 while (m.find()) {
                     iriToLabel.put(m.group(1), m.group(2));
                 }
+                m = COMMENT_ASSERT.matcher(compact);
+                while (m.find()) {
+                    iriToComment.putIfAbsent(m.group(1), m.group(2));
+                }
                 m = UI_ROLE_ASSERT.matcher(compact);
                 while (m.find()) {
                     String role = m.group(2).trim().toLowerCase();
@@ -91,19 +99,44 @@ public class OntologyContextPack {
                     childToParent.put(m.group(1), m.group(2));
                 }
             }
+            // Prefer models + their parents, then other classes (never drop models for cap)
+            Set<String> mustKeep = new LinkedHashSet<>();
+            for (String iri : classIris) {
+                if ("model".equals(iriToRole.get(iri))) {
+                    mustKeep.add(iri);
+                    String p = childToParent.get(iri);
+                    if (p != null && classIris.contains(p)) {
+                        mustKeep.add(p);
+                    }
+                }
+            }
+            List<String> orderedIris = new ArrayList<>(mustKeep);
+            for (String iri : classIris) {
+                if (!mustKeep.contains(iri)) {
+                    orderedIris.add(iri);
+                }
+            }
             int n = 0;
             int modelCount = 0;
-            for (String iri : classIris) {
-                if (n >= 120) {
-                    break;
+            final int maxClasses = 400;
+            Set<String> emitted = new LinkedHashSet<>();
+            for (String iri : orderedIris) {
+                boolean forced = mustKeep.contains(iri);
+                boolean isModel = "model".equals(iriToRole.getOrDefault(iri, ""));
+                if (!forced && n >= maxClasses) {
+                    continue;
+                }
+                if (!emitted.add(iri)) {
+                    continue;
                 }
                 Map<String, Object> row = new LinkedHashMap<>();
                 String label = iriToLabel.getOrDefault(iri, shortName(iri));
                 String uiRole = iriToRole.getOrDefault(iri, "metamodel");
                 row.put("iri", iri);
                 row.put("label", label);
+                row.put("definition", iriToComment.getOrDefault(iri, ""));
                 row.put("uiRole", uiRole);
-                row.put("kind", "model".equals(uiRole) ? "Model" : "Class");
+                row.put("kind", isModel ? "Model" : "Class");
                 String parentIri = childToParent.get(iri);
                 if (parentIri != null) {
                     row.put("parentIri", parentIri);
@@ -113,7 +146,7 @@ public class OntologyContextPack {
                     row.put("parentIri", "");
                 }
                 classes.add(row);
-                if ("model".equals(uiRole)) {
+                if (isModel) {
                     modelCount++;
                 }
                 n++;
@@ -127,6 +160,7 @@ public class OntologyContextPack {
                 row.put("kind", "DataProperty");
                 row.put("iri", iri);
                 row.put("label", iriToLabel.getOrDefault(iri, shortName(iri)));
+                row.put("definition", iriToComment.getOrDefault(iri, ""));
                 properties.add(row);
             }
             for (String iri : opIris) {
@@ -137,6 +171,7 @@ public class OntologyContextPack {
                 row.put("kind", "ObjectProperty");
                 row.put("iri", iri);
                 row.put("label", iriToLabel.getOrDefault(iri, shortName(iri)));
+                row.put("definition", iriToComment.getOrDefault(iri, ""));
                 properties.add(row);
             }
             out.put("axiomCount", axioms.size());
@@ -226,6 +261,7 @@ public class OntologyContextPack {
             node.put("id", iri);
             node.put("iri", iri);
             node.put("label", c.getOrDefault("label", shortName(iri)));
+            node.put("definition", c.getOrDefault("definition", ""));
             node.put("kind", isModel ? "Model" : "Class");
             node.put("uiRole", isModel ? "model" : "metamodel");
             node.put("parentIri", c.getOrDefault("parentIri", ""));

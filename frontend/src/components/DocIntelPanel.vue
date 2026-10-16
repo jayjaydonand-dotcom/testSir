@@ -656,7 +656,7 @@ async function seedDemo() {
     applySnapshot((await api.seedDocIntelDemo(props.projectId)) || {})
     activeTab.value = 'review'
     await loadStructureReview()
-    showToast('示范案例已写入：请在「元模型管理 / 模型管理」查看增删改，点修改项看属性对照。', true)
+    showToast('示范已写入。请打开结构审核 →「模型管理」：可见武装直升机(新增)、运输直升机(修改)、侦察直升机(删除)。', true)
   } catch (e) {
     error.value = e.message || String(e)
   } finally {
