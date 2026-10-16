@@ -26,8 +26,13 @@ import java.util.regex.Pattern;
 public class DocIntelService {
 
     private static final String NS = "http://example.org/doc-intel#";
-    /** Same annotation as modeling-app (元模型 / 型号). */
+    /** Same annotations as modeling-app (元模型 / 型号 / 五类分面). */
     private static final String BENTI_UI_ROLE = "http://example.org/benti#uiRole";
+    private static final String BENTI_UI_FACET = "http://example.org/benti#uiFacet";
+    private static final String BENTI_UI_UNIT = "http://example.org/benti#uiUnit";
+    private static final String BENTI_UI_FUNCTION_CODE = "http://example.org/benti#functionCode";
+    private static final String XSD_DECIMAL = "http://www.w3.org/2001/XMLSchema#decimal";
+    private static final String XSD_STRING = "http://www.w3.org/2001/XMLSchema#string";
     private static final Pattern HEADING = Pattern.compile("^#{1,3}\\s+(.+)$");
     private static final Pattern CN_DEF = Pattern.compile(
             "([\u4e00-\u9fffA-Za-z0-9\\-]{2,32})(?:是一种|是|指|定义为)([\u4e00-\u9fffA-Za-z0-9\\-、，,]{2,80})");
@@ -246,6 +251,7 @@ public class DocIntelService {
             cand.put("decidedAt", now);
             writeJson(storePath(projectId), normalize(projectId, store));
             out.put("status", "rejected");
+            out.put("message", "已取消该变更（未写入本体）");
             return out;
         }
 
@@ -254,51 +260,86 @@ public class DocIntelService {
         String action = String.valueOf(cand.getOrDefault("action", "create")).trim().toLowerCase(Locale.ROOT);
         String existingIri = String.valueOf(cand.getOrDefault("existingIri", "")).trim();
         String suffix = candidateId.replace("cand.", "");
+        String definition = String.valueOf(cand.getOrDefault("definition", ""));
+        String rangeHint = String.valueOf(cand.getOrDefault("rangeHint", "")).trim();
+        String functionCode = String.valueOf(cand.getOrDefault("functionCode", "")).trim();
+        String uiFacet = String.valueOf(cand.getOrDefault("uiFacet", "")).trim();
+        String parentIri = String.valueOf(cand.getOrDefault("parentIri", "")).trim();
+        String parentLabel = String.valueOf(cand.getOrDefault("parentLabel", "")).trim();
+        String domainHint = String.valueOf(cand.getOrDefault("domainHint", "")).trim();
+        if (domainHint.isBlank()) {
+            domainHint = parentLabel;
+        }
+        boolean asModel = isModelCandidate(cand);
         String iri;
-        String owl;
+        String owl = "";
         Object axiomResult = null;
 
-        // reuse: map evidence to existing entity, do not re-declare
-        if ("reuse".equals(action) && !existingIri.isBlank()) {
+        // --- DELETE: remove entity from ontology ---
+        if ("delete".equals(action) || "Delete".equals(kind)) {
             iri = existingIri;
-            owl = "";
-            cand.put("status", "accepted");
-            cand.put("decidedAt", now);
-            cand.put("acceptedIri", iri);
-            cand.put("owl", "");
-            cand.put("reuse", true);
-            List<Map<String, Object>> evidenceReuse = (List<Map<String, Object>>) store.get("evidence");
-            for (Map<String, Object> e : evidenceReuse) {
-                if (candidateId.equals(String.valueOf(e.get("candidateId")))) {
-                    e.put("acceptedIri", iri);
-                }
+            if (iri.isBlank()) {
+                iri = resolveLabelIri(projectId, label);
             }
-            writeJson(storePath(projectId), normalize(projectId, store));
-            out.put("status", "accepted");
-            out.put("acceptedIri", iri);
-            out.put("reuse", true);
-            out.put("axiomResult", Map.of("ok", true, "skipped", "reuse existing IRI"));
-            return out;
+            if (iri.isBlank()) {
+                throw new IllegalStateException("delete target IRI missing for " + label);
+            }
+            axiomResult = ontology.deleteNamedEntity(projectId, iri, asModel ? "Class" : kind);
+            return finishAccept(projectId, store, cand, candidateId, now, iri, owl, axiomResult, out,
+                    "已删除并写入本体：" + label);
         }
 
-        boolean asModel = isModelCandidate(cand);
+        // --- MODIFY / REUSE: update annotations on existing IRI ---
+        boolean isModify = "reuse".equals(action)
+                || (!existingIri.isBlank() && !"create".equals(action));
+        if (isModify && !existingIri.isBlank()) {
+            iri = existingIri;
+            Map<String, String> ann = new LinkedHashMap<>();
+            if (!definition.isBlank()) {
+                ann.put("http://www.w3.org/2000/01/rdf-schema#comment", definition);
+            }
+            if (!label.isBlank()) {
+                ann.put("http://www.w3.org/2000/01/rdf-schema#label", label);
+            }
+            if (!rangeHint.isBlank() && ("DataProperty".equals(kind) || kind.toLowerCase(Locale.ROOT).contains("data"))) {
+                ann.put(BENTI_UI_UNIT, rangeHint);
+            }
+            if (!functionCode.isBlank()) {
+                ann.put(BENTI_UI_FUNCTION_CODE, functionCode);
+            }
+            if (!ann.isEmpty()) {
+                axiomResult = ontology.replaceStringAnnotations(
+                        projectId, iri, ann, "doc-intel modify " + candidateId);
+            } else {
+                axiomResult = Map.of("ok", true, "skipped", "no annotation fields");
+            }
+            return finishAccept(projectId, store, cand, candidateId, now, iri, owl, axiomResult, out,
+                    "已修改并写入本体：" + label);
+        }
+
+        // --- ADD / CREATE ---
         if ("Relation".equals(kind)) {
             String predicate = String.valueOf(cand.getOrDefault("predicate", label));
-            String subj = String.valueOf(cand.getOrDefault("relationSubject", ""));
-            String obj = String.valueOf(cand.getOrDefault("relationObject", ""));
+            String subj = String.valueOf(cand.getOrDefault("relationSubject",
+                    domainHint.isBlank() ? parentLabel : domainHint));
+            String obj = String.valueOf(cand.getOrDefault("relationObject", rangeHint));
             iri = NS + "OP_" + suffix;
-            owl = buildRelationOwl(iri, predicate, subj, obj,
-                    String.valueOf(cand.getOrDefault("definition", "")));
+            String domainIri = resolveClassIri(projectId, parentIri, subj);
+            owl = buildFacetPropertyOwl("ObjectProperty", iri, label, definition,
+                    domainIri, uiFacet, "", functionCode, obj);
         } else if ("DataProperty".equals(kind) || "ObjectProperty".equals(kind)) {
             iri = NS + ("DataProperty".equals(kind) ? "DP_" : "OP_") + suffix;
-            owl = buildPropertyOwl(kind, iri, label, String.valueOf(cand.getOrDefault("definition", "")));
+            String domainIri = resolveClassIri(projectId, parentIri,
+                    domainHint.isBlank() ? parentLabel : domainHint);
+            owl = buildFacetPropertyOwl(kind, iri, label, definition,
+                    domainIri, uiFacet, rangeHint, functionCode, rangeHint);
         } else {
-            // Class / SubClassOf / Model → OWL class; Model gets benti:uiRole=model
             iri = NS + (asModel ? "M_" : "C_") + suffix;
-            String parentIri = String.valueOf(cand.getOrDefault("parentIri", "")).trim();
-            String parentLabel = String.valueOf(cand.getOrDefault("parentLabel", "")).trim();
             if (parentIri.isBlank() && !parentLabel.isBlank()) {
-                parentIri = NS + "C_parent_" + Integer.toHexString(parentLabel.hashCode());
+                parentIri = resolveClassIri(projectId, "", parentLabel);
+                if (parentIri.isBlank()) {
+                    parentIri = NS + "C_parent_" + Integer.toHexString(parentLabel.hashCode());
+                }
             }
             if ("SubClassOf".equals(kind) && parentLabel.isBlank()) {
                 parentLabel = "Thing";
@@ -312,30 +353,150 @@ public class DocIntelService {
                 if (parentLabel.isBlank()) {
                     parentLabel = "Parent";
                 }
-                owl = buildSubClassOwl(iri, label, parentIri, parentLabel,
-                        String.valueOf(cand.getOrDefault("definition", "")), role);
+                owl = buildSubClassOwl(iri, label, parentIri, parentLabel, definition, role);
             } else {
-                owl = buildClassOwl(iri, label, String.valueOf(cand.getOrDefault("definition", "")), role);
+                owl = buildClassOwl(iri, label, definition, role);
             }
         }
         axiomResult = ontology.addAxioms(projectId, "doc-intel accept " + candidateId, owl);
+        return finishAccept(projectId, store, cand, candidateId, now, iri, owl, axiomResult, out,
+                "已新增并写入本体：" + label);
+    }
 
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> finishAccept(String projectId,
+                                             Map<String, Object> store,
+                                             Map<String, Object> cand,
+                                             String candidateId,
+                                             long now,
+                                             String iri,
+                                             String owl,
+                                             Object axiomResult,
+                                             Map<String, Object> out,
+                                             String message) throws Exception {
         cand.put("status", "accepted");
         cand.put("decidedAt", now);
         cand.put("acceptedIri", iri);
-        cand.put("owl", owl);
-
+        cand.put("owl", owl == null ? "" : owl);
         List<Map<String, Object>> evidence = (List<Map<String, Object>>) store.get("evidence");
-        for (Map<String, Object> e : evidence) {
-            if (candidateId.equals(String.valueOf(e.get("candidateId")))) {
-                e.put("acceptedIri", iri);
+        if (evidence != null) {
+            for (Map<String, Object> e : evidence) {
+                if (candidateId.equals(String.valueOf(e.get("candidateId")))) {
+                    e.put("acceptedIri", iri);
+                }
             }
         }
         writeJson(storePath(projectId), normalize(projectId, store));
         out.put("status", "accepted");
         out.put("acceptedIri", iri);
         out.put("axiomResult", axiomResult);
+        out.put("message", message);
         return out;
+    }
+
+    private String resolveLabelIri(String projectId, String label) {
+        if (label == null || label.isBlank()) {
+            return "";
+        }
+        try {
+            Map<String, Object> pack = contextPack.build(projectId);
+            for (Map<String, Object> c : listOf(pack.get("classes"))) {
+                if (label.equals(String.valueOf(c.getOrDefault("label", "")).trim())) {
+                    return String.valueOf(c.getOrDefault("iri", ""));
+                }
+            }
+            for (Map<String, Object> p : listOf(pack.get("properties"))) {
+                if (label.equals(String.valueOf(p.getOrDefault("label", "")).trim())) {
+                    return String.valueOf(p.getOrDefault("iri", ""));
+                }
+            }
+        } catch (Exception ignored) {
+            // fall through
+        }
+        return "";
+    }
+
+    private String resolveClassIri(String projectId, String parentIri, String label) {
+        if (parentIri != null && !parentIri.isBlank()) {
+            return parentIri;
+        }
+        return resolveLabelIri(projectId, label);
+    }
+
+    private static String facetZhOf(String uiFacet) {
+        if (uiFacet == null || uiFacet.isBlank()) {
+            return "技术参数";
+        }
+        String f = uiFacet.trim();
+        if ("technicalParam".equals(f) || "技术参数".equals(f)) return "技术参数";
+        if ("stateVariable".equals(f) || "状态变量".equals(f)) return "状态变量";
+        if ("relation".equals(f) || "关系".equals(f)) return "关系";
+        if ("function".equals(f) || "功能".equals(f)) return "功能";
+        if ("behavior".equals(f) || "行为".equals(f)) return "行为";
+        return f;
+    }
+
+    /** Create property + domain + facet restriction so it appears under the class in 结构审核. */
+    private static String buildFacetPropertyOwl(String kind, String propIri, String label, String definition,
+                                                String domainIri, String uiFacet, String unit,
+                                                String functionCode, String rangeHint) {
+        boolean isData = !"ObjectProperty".equals(kind) && !"Relation".equals(kind);
+        String facetZh = facetZhOf(uiFacet);
+        StringBuilder sb = new StringBuilder();
+        sb.append("Ontology(<http://example.org/doc-intel-patch>\n");
+        sb.append("Declaration(AnnotationProperty(<").append(BENTI_UI_FACET).append(">))\n");
+        sb.append("Declaration(AnnotationProperty(<").append(BENTI_UI_UNIT).append(">))\n");
+        sb.append("Declaration(AnnotationProperty(<").append(BENTI_UI_FUNCTION_CODE).append(">))\n");
+        if (isData) {
+            sb.append("Declaration(DataProperty(<").append(propIri).append(">))\n");
+        } else {
+            sb.append("Declaration(ObjectProperty(<").append(propIri).append(">))\n");
+        }
+        sb.append("AnnotationAssertion(rdfs:label <").append(propIri).append("> \"")
+                .append(escape(label)).append("\"@zh)\n");
+        if (definition != null && !definition.isBlank()) {
+            sb.append("AnnotationAssertion(rdfs:comment <").append(propIri).append("> \"")
+                    .append(escape(definition)).append("\"@zh)\n");
+        }
+        if (unit != null && !unit.isBlank() && isData) {
+            sb.append("AnnotationAssertion(<").append(BENTI_UI_UNIT).append("> <").append(propIri).append("> \"")
+                    .append(escape(unit)).append("\")\n");
+        }
+        if (domainIri != null && !domainIri.isBlank()) {
+            sb.append("Declaration(Class(<").append(domainIri).append(">))\n");
+            if (isData) {
+                String range = (functionCode != null && !functionCode.isBlank())
+                        || "功能".equals(facetZh) || "行为".equals(facetZh)
+                        ? XSD_STRING : XSD_DECIMAL;
+                sb.append("DataPropertyDomain(<").append(propIri).append("> <").append(domainIri).append(">)\n");
+                sb.append("DataPropertyRange(<").append(propIri).append("> <").append(range).append(">)\n");
+                sb.append("SubClassOf(Annotation(<").append(BENTI_UI_FACET).append("> \"")
+                        .append(escape(facetZh)).append("\")");
+                if (functionCode != null && !functionCode.isBlank()) {
+                    sb.append(" Annotation(<").append(BENTI_UI_FUNCTION_CODE).append("> \"")
+                            .append(escape(functionCode)).append("\")");
+                }
+                sb.append(" <").append(domainIri).append("> DataSomeValuesFrom(<").append(propIri)
+                        .append("> <").append(range).append(">))\n");
+            } else {
+                String rangeIri = (rangeHint != null && rangeHint.startsWith("http"))
+                        ? rangeHint
+                        : (NS + "C_range_" + Integer.toHexString(String.valueOf(rangeHint).hashCode()));
+                sb.append("Declaration(Class(<").append(rangeIri).append(">))\n");
+                if (rangeHint != null && !rangeHint.isBlank() && !rangeHint.startsWith("http")) {
+                    sb.append("AnnotationAssertion(rdfs:label <").append(rangeIri).append("> \"")
+                            .append(escape(rangeHint)).append("\"@zh)\n");
+                }
+                sb.append("ObjectPropertyDomain(<").append(propIri).append("> <").append(domainIri).append(">)\n");
+                sb.append("ObjectPropertyRange(<").append(propIri).append("> <").append(rangeIri).append(">)\n");
+                sb.append("SubClassOf(Annotation(<").append(BENTI_UI_FACET).append("> \"")
+                        .append(escape(facetZh)).append("\") <").append(domainIri)
+                        .append("> ObjectSomeValuesFrom(<").append(propIri).append("> <")
+                        .append(rangeIri).append(">))\n");
+            }
+        }
+        sb.append(")");
+        return sb.toString();
     }
 
     /**
@@ -474,6 +635,17 @@ public class DocIntelService {
             ch.put("parentIri", parentIri);
             ch.put("existingIri", existingIri);
             ch.put("action", action.isBlank() ? ("modify".equals(changeType) ? "reuse" : "create") : action);
+            ch.put("uiFacet", cand.getOrDefault("uiFacet", ""));
+            ch.put("facetLabel", cand.getOrDefault("facetLabel",
+                    facetDisplay(cand.get("uiFacet"), cand.get("facetLabel"))));
+            ch.put("functionCode", cand.getOrDefault("functionCode", ""));
+            // Prefer explicit domainHint; fall back to parentLabel (seed uses parent as domain)
+            Object domainHint = cand.get("domainHint");
+            if (domainHint == null || String.valueOf(domainHint).isBlank()) {
+                domainHint = parentLabel;
+            }
+            ch.put("domainHint", domainHint == null ? "" : domainHint);
+            ch.put("rangeHint", cand.getOrDefault("rangeHint", ""));
             ch.put("fieldDiffs", fieldDiffs);
             ch.put("evidence", evidence);
             changes.add(ch);
@@ -592,6 +764,33 @@ public class DocIntelService {
         return sb.length() == 0 ? "文档抽取候选（无摘录）" : sb.toString();
     }
 
+    private static String facetDisplay(Object facetId, Object facetLabel) {
+        String label = firstNonBlank(facetLabel);
+        if (!label.isBlank()) {
+            return label;
+        }
+        String id = firstNonBlank(facetId);
+        if (id.isBlank()) {
+            return "";
+        }
+        if ("technicalParam".equals(id)) {
+            return "技术参数";
+        }
+        if ("stateVariable".equals(id)) {
+            return "状态变量";
+        }
+        if ("relation".equals(id)) {
+            return "关系";
+        }
+        if ("function".equals(id)) {
+            return "功能";
+        }
+        if ("behavior".equals(id)) {
+            return "行为";
+        }
+        return id;
+    }
+
     private static String firstNonBlank(Object... values) {
         if (values == null) {
             return "";
@@ -657,8 +856,14 @@ public class DocIntelService {
                 String.valueOf(ex.getOrDefault("domainHint", "")),
                 String.valueOf(cand.getOrDefault("domainHint", "")), basis);
         addFieldDiff(diffs, "rangeHint", "值域/单位提示",
-                String.valueOf(ex.getOrDefault("rangeHint", "")),
-                String.valueOf(cand.getOrDefault("rangeHint", "")), basis);
+                firstNonBlank(ex.get("rangeHint"), ex.get("unit")),
+                firstNonBlank(cand.get("rangeHint"), cand.get("unit")), basis);
+        addFieldDiff(diffs, "uiFacet", "所属分面",
+                facetDisplay(ex.get("uiFacet"), ex.get("facetLabel")),
+                facetDisplay(cand.get("uiFacet"), cand.get("facetLabel")), basis);
+        addFieldDiff(diffs, "functionCode", "功能编码",
+                String.valueOf(ex.getOrDefault("functionCode", "")),
+                String.valueOf(cand.getOrDefault("functionCode", "")), basis);
         if (diffs.isEmpty()) {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("field", "match");
@@ -980,46 +1185,40 @@ public class DocIntelService {
         String iriRotor = NS + "C_MainRotor";
         String iriTail = NS + "C_TailRotor";
         String iriMTOW = NS + "DP_MaxTakeoffWeight";
+        String iriRotorDia = NS + "DP_RotorDiameter";
+        String iriEndurance = NS + "DP_Endurance";
+        String iriAltitude = NS + "DP_Altitude";
+        String iriHeading = NS + "DP_Heading";
+        String iriHasRotor = NS + "OP_HasMainRotor";
+        String iriHasTail = NS + "OP_HasTailRotor";
+        String iriVtol = NS + "DP_CapabilityVTOL";
+        String iriHover = NS + "DP_CapabilityHover";
+        String iriTakeoffBeh = NS + "DP_BehaviorTakeoff";
+        String iriCruiseBeh = NS + "DP_BehaviorCruise";
         String iriTransport = NS + "M_TransportHeli";
         String iriScout = NS + "M_ScoutHeli";
 
-        // 1) Baseline ontology (元模型 + 模型) so modify/delete have existing targets
-        String baselineOwl = ""
-                + "Ontology(<http://example.org/doc-intel-baseline>\n"
-                + "Declaration(AnnotationProperty(<" + BENTI_UI_ROLE + ">))\n"
-                + "Declaration(Class(<" + iriHeli + ">))\n"
-                + "AnnotationAssertion(rdfs:label <" + iriHeli + "> \"直升机\"@zh)\n"
-                + "AnnotationAssertion(rdfs:comment <" + iriHeli + "> \"以旋翼提供升力的飞行器\"@zh)\n"
-                + "AnnotationAssertion(<" + BENTI_UI_ROLE + "> <" + iriHeli + "> \"metamodel\")\n"
-                + "Declaration(Class(<" + iriRotor + ">))\n"
-                + "AnnotationAssertion(rdfs:label <" + iriRotor + "> \"主旋翼\"@zh)\n"
-                + "AnnotationAssertion(rdfs:comment <" + iriRotor + "> \"提供升力的气动装置\"@zh)\n"
-                + "AnnotationAssertion(<" + BENTI_UI_ROLE + "> <" + iriRotor + "> \"metamodel\")\n"
-                + "Declaration(Class(<" + iriTail + ">))\n"
-                + "AnnotationAssertion(rdfs:label <" + iriTail + "> \"尾桨\"@zh)\n"
-                + "AnnotationAssertion(rdfs:comment <" + iriTail + "> \"抗扭与航向控制装置\"@zh)\n"
-                + "AnnotationAssertion(<" + BENTI_UI_ROLE + "> <" + iriTail + "> \"metamodel\")\n"
-                + "Declaration(DataProperty(<" + iriMTOW + ">))\n"
-                + "AnnotationAssertion(rdfs:label <" + iriMTOW + "> \"最大起飞重量\"@zh)\n"
-                + "AnnotationAssertion(rdfs:comment <" + iriMTOW + "> \"允许起飞的最大重量\"@zh)\n"
-                + "Declaration(Class(<" + iriTransport + ">))\n"
-                + "AnnotationAssertion(rdfs:label <" + iriTransport + "> \"运输直升机\"@zh)\n"
-                + "AnnotationAssertion(rdfs:comment <" + iriTransport + "> \"用于人员和物资运输的直升机\"@zh)\n"
-                + "AnnotationAssertion(<" + BENTI_UI_ROLE + "> <" + iriTransport + "> \"model\")\n"
-                + "SubClassOf(<" + iriTransport + "> <" + iriHeli + ">)\n"
-                + "Declaration(Class(<" + iriScout + ">))\n"
-                + "AnnotationAssertion(rdfs:label <" + iriScout + "> \"侦察直升机\"@zh)\n"
-                + "AnnotationAssertion(rdfs:comment <" + iriScout + "> \"用于战场侦察的轻型直升机\"@zh)\n"
-                + "AnnotationAssertion(<" + BENTI_UI_ROLE + "> <" + iriScout + "> \"model\")\n"
-                + "SubClassOf(<" + iriScout + "> <" + iriHeli + ">)\n"
-                + ")";
-        ontology.addAxioms(projectId, "doc-intel seed baseline metamodel+models", baselineOwl);
+        // 1) Baseline：直升机元模型五类分面 + 型号，便于在元模型管理/结构审核中验证
+        String baselineOwl = buildHelicopterBaselineOwl(
+                iriHeli, iriRotor, iriTail,
+                iriMTOW, iriRotorDia, iriEndurance,
+                iriAltitude, iriHeading,
+                iriHasRotor, iriHasTail,
+                iriVtol, iriHover, iriTakeoffBeh, iriCruiseBeh,
+                iriTransport, iriScout);
+        ontology.addAxioms(projectId, "doc-intel seed helicopter metamodel facets + models", baselineOwl);
 
         String sample = ""
                 + "# 旋翼平台论证摘录（结构审核示范）\n\n"
                 + "【元模型·修改】直升机是一种以旋翼系统提供升力与部分推进力的垂直起降飞行器，用于运输、攻击与特种作战。\n"
                 + "【元模型·新增】动力系统是为旋翼与尾桨提供功率的成套装置。\n"
-                + "【元模型·属性修改】最大起飞重量指航空器允许起飞的最大重量，单位为千克（kg）。\n"
+                + "【技术参数·修改】最大起飞重量指航空器允许起飞的最大重量，单位为千克（kg）。\n"
+                + "【技术参数·新增】任务载荷是可装载的任务设备与物资质量，单位千克。\n"
+                + "【状态变量·修改】当前高度指飞行中相对起飞点的气压高度，单位米。\n"
+                + "【关系·新增】挂载武器系统描述直升机与武器吊舱/火控的对象关系。\n"
+                + "【关系·删除】论证建议取消独立「安装尾桨」关系条目，并入尾桨组件装配约束。\n"
+                + "【功能·修改】垂直起降能力指无需跑道完成起降的功能（编码 VTOL）。\n"
+                + "【行为·新增】攻击机动是进入射击航线并完成火力投送的行为描述。\n"
                 + "【模型·新增】武装直升机属于直升机，是配备对地/对空武器系统的作战型号。\n"
                 + "【模型·修改】运输直升机是以人员和物资运输为主要任务的直升机型号，强调舱容与外吊能力。\n"
                 + "【模型·删除】论证结论建议不再保留「侦察直升机」作为独立型号条目，其能力并入多用途型号。\n"
@@ -1060,13 +1259,82 @@ public class DocIntelService {
                 null, null, "create", "metamodel",
                 "动力系统是为旋翼与尾桨提供功率的成套装置。", 1);
 
-        // --- 元模型属性：修改最大起飞重量定义+单位 ---
+        // --- 技术参数：修改最大起飞重量 ---
         Map<String, Object> mtow = addCuratedCandidate(candidates, evidence, docId, chunks,
                 "DataProperty", "最大起飞重量",
                 "航空器允许起飞的最大重量",
-                null, iriMTOW, "reuse", null,
+                "直升机", iriMTOW, "reuse", null,
                 "最大起飞重量指航空器允许起飞的最大重量，单位为千克（kg）。", 1);
         mtow.put("rangeHint", "千克(kg)");
+        mtow.put("uiFacet", "technicalParam");
+        mtow.put("facetLabel", "技术参数");
+        mtow.put("domainHint", "直升机");
+
+        // --- 技术参数：新增任务载荷 ---
+        Map<String, Object> payload = addCuratedCandidate(candidates, evidence, docId, chunks,
+                "DataProperty", "任务载荷",
+                "可装载的任务设备与物资质量",
+                "直升机", null, "create", null,
+                "任务载荷是可装载的任务设备与物资质量，单位千克。", 1);
+        payload.put("rangeHint", "千克");
+        payload.put("uiFacet", "technicalParam");
+        payload.put("facetLabel", "技术参数");
+        payload.put("domainHint", "直升机");
+        payload.put("existingIri", ""); // force add
+        // reuse fixed IRI only after accept; keep create
+
+        // --- 状态变量：修改当前高度 ---
+        Map<String, Object> alt = addCuratedCandidate(candidates, evidence, docId, chunks,
+                "DataProperty", "当前高度",
+                "飞行中相对起飞点的气压高度",
+                "直升机", iriAltitude, "reuse", null,
+                "当前高度指飞行中相对起飞点的气压高度，单位米。", 1);
+        alt.put("rangeHint", "米");
+        alt.put("uiFacet", "stateVariable");
+        alt.put("facetLabel", "状态变量");
+        alt.put("domainHint", "直升机");
+
+        // --- 关系：新增挂载武器系统 ---
+        Map<String, Object> weapon = addCuratedCandidate(candidates, evidence, docId, chunks,
+                "ObjectProperty", "挂载武器系统",
+                "直升机与武器吊舱/火控之间的挂载关系",
+                "直升机", null, "create", null,
+                "挂载武器系统描述直升机与武器吊舱/火控的对象关系。", 1);
+        weapon.put("uiFacet", "relation");
+        weapon.put("facetLabel", "关系");
+        weapon.put("domainHint", "直升机");
+        weapon.put("rangeHint", "武器系统");
+
+        // --- 关系：删除安装尾桨 ---
+        Map<String, Object> dropTail = addCuratedCandidate(candidates, evidence, docId, chunks,
+                "ObjectProperty", "安装尾桨",
+                "直升机与尾桨的安装关系",
+                "直升机", iriHasTail, "delete", null,
+                "论证建议取消独立「安装尾桨」关系条目，并入尾桨组件装配约束。", 1);
+        dropTail.put("uiFacet", "relation");
+        dropTail.put("facetLabel", "关系");
+        dropTail.put("domainHint", "直升机");
+
+        // --- 功能：修改垂直起降 ---
+        Map<String, Object> vtol = addCuratedCandidate(candidates, evidence, docId, chunks,
+                "DataProperty", "垂直起降",
+                "无需跑道完成起降的功能",
+                "直升机", iriVtol, "reuse", null,
+                "垂直起降能力指无需跑道完成起降的功能（编码 VTOL）。", 1);
+        vtol.put("uiFacet", "function");
+        vtol.put("facetLabel", "功能");
+        vtol.put("functionCode", "VTOL");
+        vtol.put("domainHint", "直升机");
+
+        // --- 行为：新增攻击机动 ---
+        Map<String, Object> attack = addCuratedCandidate(candidates, evidence, docId, chunks,
+                "DataProperty", "攻击机动",
+                "进入射击航线并完成火力投送的行为",
+                "直升机", null, "create", null,
+                "攻击机动是进入射击航线并完成火力投送的行为描述。", 1);
+        attack.put("uiFacet", "behavior");
+        attack.put("facetLabel", "行为");
+        attack.put("domainHint", "直升机");
 
         // --- 模型：新增武装直升机 ---
         addCuratedCandidate(candidates, evidence, docId, chunks,
@@ -1099,31 +1367,9 @@ public class DocIntelService {
         List<Map<String, Object>> nextChunks = filterOutDoc(listOf(store.get("chunks")), docId);
         nextChunks.addAll(0, chunks);
         store.put("chunks", nextChunks);
-        // Wipe ALL pending candidates so old OntoGPT noise cannot hide model CRUD demo
-        List<Map<String, Object>> nextCand = new ArrayList<>();
-        for (Map<String, Object> c : listOf(store.get("candidates"))) {
-            if (!"pending".equals(String.valueOf(c.get("status")))) {
-                nextCand.add(c);
-            }
-        }
-        nextCand.addAll(0, candidates);
-        store.put("candidates", nextCand);
-        List<Map<String, Object>> nextEv = new ArrayList<>();
-        for (Map<String, Object> e : listOf(store.get("evidence"))) {
-            String cid = String.valueOf(e.getOrDefault("candidateId", ""));
-            boolean keep = false;
-            for (Map<String, Object> c : nextCand) {
-                if (cid.equals(String.valueOf(c.get("id"))) && !"pending".equals(String.valueOf(c.get("status")))) {
-                    keep = true;
-                    break;
-                }
-            }
-            if (keep && !docId.equals(String.valueOf(e.get("docId")))) {
-                nextEv.add(e);
-            }
-        }
-        nextEv.addAll(0, evidence);
-        store.put("evidence", nextEv);
+        // Fresh demo: replace all candidates/evidence so decided overlays match this seed only
+        store.put("candidates", new ArrayList<>(candidates));
+        store.put("evidence", new ArrayList<>(evidence));
 
         String jobId = "job.demo." + System.currentTimeMillis();
         Map<String, Object> job = new LinkedHashMap<>();
@@ -1135,7 +1381,7 @@ public class DocIntelService {
         job.put("updatedAt", System.currentTimeMillis());
         job.put("chunkCount", chunks.size());
         job.put("candidateCount", candidates.size());
-        job.put("message", "结构审核示范已就绪：元模型 修改/新增/属性修改；模型 新增/修改/删除");
+        job.put("message", "结构审核示范已就绪：直升机五类分面齐全；元模型/分面/模型均含增删改");
         List<Map<String, Object>> jobs = listOf(store.get("jobs"));
         jobs.removeIf(j -> docId.equals(String.valueOf(j.get("docId"))));
         jobs.add(0, job);
@@ -1151,6 +1397,108 @@ public class DocIntelService {
         out.put("structureReview", structureReview(projectId));
         out.put("message", String.valueOf(job.get("message")));
         return out;
+    }
+
+    /**
+     * Helicopter metamodel with modeling-app 五类分面 (技术参数/状态变量/关系/功能/行为)
+     * written as SubClassOf(Annotation(uiFacet "…") Class Data/ObjectSomeValuesFrom(…)).
+     */
+    private static String buildHelicopterBaselineOwl(
+            String iriHeli, String iriRotor, String iriTail,
+            String iriMTOW, String iriRotorDia, String iriEndurance,
+            String iriAltitude, String iriHeading,
+            String iriHasRotor, String iriHasTail,
+            String iriVtol, String iriHover, String iriTakeoffBeh, String iriCruiseBeh,
+            String iriTransport, String iriScout) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Ontology(<http://example.org/doc-intel-baseline>\n");
+        sb.append("Declaration(AnnotationProperty(<").append(BENTI_UI_ROLE).append(">))\n");
+        sb.append("Declaration(AnnotationProperty(<").append(BENTI_UI_FACET).append(">))\n");
+        sb.append("Declaration(AnnotationProperty(<").append(BENTI_UI_UNIT).append(">))\n");
+        sb.append("Declaration(AnnotationProperty(<").append(BENTI_UI_FUNCTION_CODE).append(">))\n");
+
+        // Classes
+        appendMetaClass(sb, iriHeli, "直升机", "以旋翼提供升力的飞行器");
+        appendMetaClass(sb, iriRotor, "主旋翼", "提供升力的气动装置");
+        appendMetaClass(sb, iriTail, "尾桨", "抗扭与航向控制装置");
+
+        // 技术参数
+        appendDataFacet(sb, iriHeli, iriMTOW, "最大起飞重量", "允许起飞的最大重量", "kg", "技术参数", null);
+        appendDataFacet(sb, iriHeli, iriRotorDia, "旋翼直径", "主旋翼桨盘直径", "m", "技术参数", null);
+        appendDataFacet(sb, iriHeli, iriEndurance, "续航时间", "规定任务剖面下可持续飞行时间", "h", "技术参数", null);
+
+        // 状态变量
+        appendDataFacet(sb, iriHeli, iriAltitude, "当前高度", "相对起飞点的气压高度", "m", "状态变量", null);
+        appendDataFacet(sb, iriHeli, iriHeading, "当前航向", "机头方位角", "deg", "状态变量", null);
+
+        // 关系
+        appendObjectFacet(sb, iriHeli, iriHasRotor, "安装主旋翼", "直升机与主旋翼的安装关系", iriRotor, "关系");
+        appendObjectFacet(sb, iriHeli, iriHasTail, "安装尾桨", "直升机与尾桨的安装关系", iriTail, "关系");
+
+        // 功能
+        appendDataFacet(sb, iriHeli, iriVtol, "垂直起降", "无需跑道完成起降", null, "功能", "VTOL");
+        appendDataFacet(sb, iriHeli, iriHover, "悬停", "空中定点悬停能力", null, "功能", "HOVER");
+
+        // 行为
+        appendDataFacet(sb, iriHeli, iriTakeoffBeh, "起飞流程", "从地面滑跑/离地到爬升的行为过程", null, "行为", null);
+        appendDataFacet(sb, iriHeli, iriCruiseBeh, "巡航行为", "定常巡航段的姿态与功率控制行为", null, "行为", null);
+
+        // Models
+        appendModelClass(sb, iriTransport, "运输直升机", "用于人员和物资运输的直升机", iriHeli);
+        appendModelClass(sb, iriScout, "侦察直升机", "用于战场侦察的轻型直升机", iriHeli);
+
+        sb.append(")");
+        return sb.toString();
+    }
+
+    private static void appendMetaClass(StringBuilder sb, String iri, String label, String comment) {
+        sb.append("Declaration(Class(<").append(iri).append(">))\n");
+        sb.append("AnnotationAssertion(rdfs:label <").append(iri).append("> \"").append(escape(label)).append("\"@zh)\n");
+        sb.append("AnnotationAssertion(rdfs:comment <").append(iri).append("> \"").append(escape(comment)).append("\"@zh)\n");
+        sb.append("AnnotationAssertion(<").append(BENTI_UI_ROLE).append("> <").append(iri).append("> \"metamodel\")\n");
+    }
+
+    private static void appendModelClass(StringBuilder sb, String iri, String label, String comment, String parentIri) {
+        sb.append("Declaration(Class(<").append(iri).append(">))\n");
+        sb.append("AnnotationAssertion(rdfs:label <").append(iri).append("> \"").append(escape(label)).append("\"@zh)\n");
+        sb.append("AnnotationAssertion(rdfs:comment <").append(iri).append("> \"").append(escape(comment)).append("\"@zh)\n");
+        sb.append("AnnotationAssertion(<").append(BENTI_UI_ROLE).append("> <").append(iri).append("> \"model\")\n");
+        sb.append("SubClassOf(<").append(iri).append("> <").append(parentIri).append(">)\n");
+    }
+
+    private static void appendDataFacet(StringBuilder sb, String classIri, String propIri,
+                                        String label, String comment, String unit,
+                                        String facetZh, String functionCode) {
+        sb.append("Declaration(DataProperty(<").append(propIri).append(">))\n");
+        sb.append("AnnotationAssertion(rdfs:label <").append(propIri).append("> \"").append(escape(label)).append("\"@zh)\n");
+        sb.append("AnnotationAssertion(rdfs:comment <").append(propIri).append("> \"").append(escape(comment)).append("\"@zh)\n");
+        if (unit != null && !unit.isBlank()) {
+            sb.append("AnnotationAssertion(<").append(BENTI_UI_UNIT).append("> <").append(propIri).append("> \"")
+                    .append(escape(unit)).append("\")\n");
+        }
+        String range = (functionCode != null || "功能".equals(facetZh) || "行为".equals(facetZh))
+                ? XSD_STRING : XSD_DECIMAL;
+        sb.append("DataPropertyDomain(<").append(propIri).append("> <").append(classIri).append(">)\n");
+        sb.append("DataPropertyRange(<").append(propIri).append("> <").append(range).append(">)\n");
+        sb.append("SubClassOf(Annotation(<").append(BENTI_UI_FACET).append("> \"").append(escape(facetZh)).append("\")");
+        if (functionCode != null && !functionCode.isBlank()) {
+            sb.append(" Annotation(<").append(BENTI_UI_FUNCTION_CODE).append("> \"")
+                    .append(escape(functionCode)).append("\")");
+        }
+        sb.append(" <").append(classIri).append("> DataSomeValuesFrom(<").append(propIri)
+                .append("> <").append(range).append(">))\n");
+    }
+
+    private static void appendObjectFacet(StringBuilder sb, String classIri, String propIri,
+                                          String label, String comment, String rangeIri, String facetZh) {
+        sb.append("Declaration(ObjectProperty(<").append(propIri).append(">))\n");
+        sb.append("AnnotationAssertion(rdfs:label <").append(propIri).append("> \"").append(escape(label)).append("\"@zh)\n");
+        sb.append("AnnotationAssertion(rdfs:comment <").append(propIri).append("> \"").append(escape(comment)).append("\"@zh)\n");
+        sb.append("ObjectPropertyDomain(<").append(propIri).append("> <").append(classIri).append(">)\n");
+        sb.append("ObjectPropertyRange(<").append(propIri).append("> <").append(rangeIri).append(">)\n");
+        sb.append("SubClassOf(Annotation(<").append(BENTI_UI_FACET).append("> \"").append(escape(facetZh)).append("\") <")
+                .append(classIri).append("> ObjectSomeValuesFrom(<").append(propIri).append("> <")
+                .append(rangeIri).append(">))\n");
     }
 
     /** Helper: append curated candidate + evidence; returns the candidate map for extra fields. */

@@ -485,6 +485,93 @@ public class EmbeddedOntologyService {
         return mutateAxioms(projectId, message, owlFunctional, false);
     }
 
+    /**
+     * Delete a named class / data property / object property (and referencing axioms).
+     * kind: Class | DataProperty | ObjectProperty | Relation | Model
+     */
+    public Map<String, Object> deleteNamedEntity(String projectId, String entityIri, String kind) {
+        runtime.start();
+        try {
+            ProjectId pid = ProjectId.get(projectId);
+            OWLDataFactory df = OWLManager.getOWLDataFactory();
+            IRI iri = IRI.create(entityIri);
+            String k = kind == null ? "Class" : kind.trim();
+            OWLEntity entity;
+            if ("DataProperty".equalsIgnoreCase(k)) {
+                entity = df.getOWLDataProperty(iri);
+            } else if ("ObjectProperty".equalsIgnoreCase(k) || "Relation".equalsIgnoreCase(k)) {
+                entity = df.getOWLObjectProperty(iri);
+            } else {
+                entity = df.getOWLClass(iri);
+            }
+            OWLOntology ontology = largestOntology(projectId);
+            int referencing = ontology == null ? 0 : ontology.getReferencingAxioms(entity).size();
+            execute(new DeleteEntitiesAction(pid, Collections.singleton(entity)));
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("operation", "DELETE_ENTITY");
+            out.put("iri", entityIri);
+            out.put("kind", k);
+            out.put("referencingAxioms", referencing);
+            return out;
+        } catch (Exception e) {
+            throw wrap("deleteNamedEntity", e);
+        }
+    }
+
+    /**
+     * Replace string annotation assertions on a subject (e.g. rdfs:comment, uiUnit).
+     * Removes existing assertions for each annotation property, then adds the new literals.
+     */
+    public Map<String, Object> replaceStringAnnotations(String projectId,
+                                                        String subjectIri,
+                                                        Map<String, String> annPropToLiteral,
+                                                        String message) {
+        runtime.start();
+        try {
+            ProjectId pid = ProjectId.get(projectId);
+            OWLOntology ontology = largestOntology(projectId);
+            if (ontology == null) {
+                throw new IllegalStateException("No ontology in revision snapshot");
+            }
+            OWLDataFactory df = OWLManager.getOWLDataFactory();
+            IRI subject = IRI.create(subjectIri);
+            List<OWLAxiom> toRemove = new ArrayList<>();
+            List<OWLAxiom> toAdd = new ArrayList<>();
+            for (Map.Entry<String, String> e : annPropToLiteral.entrySet()) {
+                if (e.getKey() == null || e.getKey().isBlank()) {
+                    continue;
+                }
+                OWLAnnotationProperty prop = df.getOWLAnnotationProperty(IRI.create(e.getKey()));
+                for (OWLAnnotationAssertionAxiom ax : ontology.getAnnotationAssertionAxioms(subject)) {
+                    if (ax.getProperty().equals(prop)) {
+                        toRemove.add(ax);
+                    }
+                }
+                String lit = e.getValue() == null ? "" : e.getValue();
+                if (!lit.isBlank()) {
+                    OWLLiteral value = df.getOWLLiteral(lit, "zh");
+                    toAdd.add(df.getOWLAnnotationAssertionAxiom(prop, subject, value));
+                }
+            }
+            String msg = message == null || message.isEmpty() ? "Replace annotations" : message;
+            if (!toRemove.isEmpty()) {
+                execute(new DeleteAxiomsAction(pid, toRemove.stream(), msg + " (remove)"));
+            }
+            if (!toAdd.isEmpty()) {
+                execute(new AddAxiomsAction(pid, toAdd.stream(), msg + " (add)"));
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("removed", toRemove.size());
+            out.put("added", toAdd.size());
+            out.put("iri", subjectIri);
+            return out;
+        } catch (Exception e) {
+            throw wrap("replaceStringAnnotations", e);
+        }
+    }
+
     private Object mutateAxioms(String projectId, String message, String owlFunctional, boolean add) {
         runtime.start();
         try {

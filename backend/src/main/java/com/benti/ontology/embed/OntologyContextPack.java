@@ -27,7 +27,7 @@ public class OntologyContextPack {
             Pattern.CASE_INSENSITIVE);
     /** AnnotationAssertion(<...#uiRole> <classIri> "model"|"metamodel") — full or prefixed. */
     private static final Pattern UI_ROLE_ASSERT = Pattern.compile(
-            "AnnotationAssertion\\([^\\s]*uiRole\\s+<([^>]+)>\\s+\\\"([^\\\"]+)\\\"",
+            "AnnotationAssertion\\([^\\s]*uiRole[^<]*<([^>]+)>\\s+\\\"([^\\\"]+)\\\"",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern SUBCLASS = Pattern.compile(
             "SubClassOf\\(<([^>]+)>\\s+<([^>]+)>\\)");
@@ -35,6 +35,20 @@ public class OntologyContextPack {
             "Declaration\\(DataProperty\\(<([^>]+)>\\)\\)");
     private static final Pattern DECL_OP = Pattern.compile(
             "Declaration\\(ObjectProperty\\(<([^>]+)>\\)\\)");
+    private static final Pattern UNIT_ASSERT = Pattern.compile(
+            "AnnotationAssertion\\([^\\s]*uiUnit[^<]*<([^>]+)>\\s+\\\"([^\\\"]+)\\\"",
+            Pattern.CASE_INSENSITIVE);
+    /** Annotation(<...#uiFacet> "技术参数") — may include > between property and literal. */
+    private static final Pattern FACET_ANN = Pattern.compile(
+            "Annotation\\([^\\s]*uiFacet[^\\\"]*\\\"([^\\\"]+)\\\"\\)",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern FUNCTION_CODE_ANN = Pattern.compile(
+            "Annotation\\([^\\s]*functionCode[^\\\"]*\\\"([^\\\"]+)\\\"\\)",
+            Pattern.CASE_INSENSITIVE);
+    /** … <classIri> Data|ObjectSomeValuesFrom(<propIri> …) — range may be xsd:decimal without <>. */
+    private static final Pattern CLASS_SOME_VALUES = Pattern.compile(
+            "<([^>]+)>\\s+(Data|Object)SomeValuesFrom\\(<([^>]+)>",
+            Pattern.CASE_INSENSITIVE);
 
     private final EmbeddedOntologyService ontology;
     private final ProjectAuxStore auxStore;
@@ -59,6 +73,9 @@ public class OntologyContextPack {
             Map<String, String> iriToComment = new LinkedHashMap<>();
             Map<String, String> childToParent = new LinkedHashMap<>();
             Map<String, String> iriToRole = new LinkedHashMap<>();
+            Map<String, String> iriToUnit = new LinkedHashMap<>();
+            /** classIri -> list of facet field rows */
+            Map<String, List<Map<String, Object>>> classFacets = new LinkedHashMap<>();
             Set<String> classIris = new LinkedHashSet<>();
             Set<String> dpIris = new LinkedHashSet<>();
             Set<String> opIris = new LinkedHashSet<>();
@@ -85,7 +102,8 @@ public class OntologyContextPack {
                 }
                 m = COMMENT_ASSERT.matcher(compact);
                 while (m.find()) {
-                    iriToComment.putIfAbsent(m.group(1), m.group(2));
+                    // last write wins so doc-intel modify patches are visible
+                    iriToComment.put(m.group(1), m.group(2));
                 }
                 m = UI_ROLE_ASSERT.matcher(compact);
                 while (m.find()) {
@@ -94,10 +112,48 @@ public class OntologyContextPack {
                         iriToRole.put(m.group(1), role);
                     }
                 }
+                m = UNIT_ASSERT.matcher(compact);
+                while (m.find()) {
+                    iriToUnit.put(m.group(1), m.group(2));
+                }
                 m = SUBCLASS.matcher(compact);
                 while (m.find()) {
                     childToParent.put(m.group(1), m.group(2));
                 }
+            }
+            // Second pass: facet restrictions (OWLAPI may reorder Annotation(*) before class)
+            for (String ax : axioms) {
+                if (ax == null || !ax.contains("uiFacet") || !ax.contains("SomeValuesFrom")) {
+                    continue;
+                }
+                String compact = ax.replaceAll("\\s+", " ").trim();
+                Matcher fa = FACET_ANN.matcher(compact);
+                if (!fa.find()) {
+                    continue;
+                }
+                String facetZh = fa.group(1);
+                String functionCode = "";
+                Matcher fc = FUNCTION_CODE_ANN.matcher(compact);
+                if (fc.find()) {
+                    functionCode = fc.group(1);
+                }
+                Matcher sm = CLASS_SOME_VALUES.matcher(compact);
+                if (!sm.find()) {
+                    continue;
+                }
+                String classIri = sm.group(1);
+                String propKind = sm.group(2);
+                String propIri = sm.group(3);
+                Map<String, Object> field = new LinkedHashMap<>();
+                field.put("facet", normalizeFacetId(facetZh));
+                field.put("facetLabel", facetZh);
+                field.put("propertyIri", propIri);
+                field.put("label", iriToLabel.getOrDefault(propIri, shortName(propIri)));
+                field.put("definition", iriToComment.getOrDefault(propIri, ""));
+                field.put("unit", iriToUnit.getOrDefault(propIri, ""));
+                field.put("functionCode", functionCode);
+                field.put("kind", "Data".equalsIgnoreCase(propKind) ? "DataProperty" : "ObjectProperty");
+                classFacets.computeIfAbsent(classIri, k -> new ArrayList<>()).add(field);
             }
             // Prefer models + their parents, then other classes (never drop models for cap)
             Set<String> mustKeep = new LinkedHashSet<>();
@@ -137,6 +193,9 @@ public class OntologyContextPack {
                 row.put("definition", iriToComment.getOrDefault(iri, ""));
                 row.put("uiRole", uiRole);
                 row.put("kind", isModel ? "Model" : "Class");
+                List<Map<String, Object>> facets = classFacets.getOrDefault(iri, List.of());
+                row.put("facets", groupFacets(facets));
+                row.put("facetFields", facets);
                 String parentIri = childToParent.get(iri);
                 if (parentIri != null) {
                     row.put("parentIri", parentIri);
@@ -153,7 +212,7 @@ public class OntologyContextPack {
             }
             out.put("modelClassCount", modelCount);
             for (String iri : dpIris) {
-                if (properties.size() >= 60) {
+                if (properties.size() >= 120) {
                     break;
                 }
                 Map<String, Object> row = new LinkedHashMap<>();
@@ -161,10 +220,11 @@ public class OntologyContextPack {
                 row.put("iri", iri);
                 row.put("label", iriToLabel.getOrDefault(iri, shortName(iri)));
                 row.put("definition", iriToComment.getOrDefault(iri, ""));
+                row.put("unit", iriToUnit.getOrDefault(iri, ""));
                 properties.add(row);
             }
             for (String iri : opIris) {
-                if (properties.size() >= 80) {
+                if (properties.size() >= 160) {
                     break;
                 }
                 Map<String, Object> row = new LinkedHashMap<>();
@@ -264,6 +324,8 @@ public class OntologyContextPack {
             node.put("definition", c.getOrDefault("definition", ""));
             node.put("kind", isModel ? "Model" : "Class");
             node.put("uiRole", isModel ? "model" : "metamodel");
+            node.put("facets", c.getOrDefault("facets", Map.of()));
+            node.put("facetFields", c.getOrDefault("facetFields", List.of()));
             node.put("parentIri", c.getOrDefault("parentIri", ""));
             node.put("parentLabel", c.getOrDefault("parentLabel", ""));
             node.put("change", "stable");
@@ -305,6 +367,43 @@ public class OntologyContextPack {
             roots.add(propRoot);
         }
         return roots;
+    }
+
+    private static String normalizeFacetId(String facetZhOrId) {
+        if (facetZhOrId == null) {
+            return "";
+        }
+        String v = facetZhOrId.trim();
+        if ("技术参数".equals(v) || "technicalParam".equals(v)) {
+            return "technicalParam";
+        }
+        if ("状态变量".equals(v) || "stateVariable".equals(v)) {
+            return "stateVariable";
+        }
+        if ("关系".equals(v) || "relation".equals(v)) {
+            return "relation";
+        }
+        if ("功能".equals(v) || "function".equals(v)) {
+            return "function";
+        }
+        if ("行为".equals(v) || "behavior".equals(v)) {
+            return "behavior";
+        }
+        return v;
+    }
+
+    private static Map<String, List<Map<String, Object>>> groupFacets(List<Map<String, Object>> fields) {
+        Map<String, List<Map<String, Object>>> out = new LinkedHashMap<>();
+        out.put("technicalParam", new ArrayList<>());
+        out.put("stateVariable", new ArrayList<>());
+        out.put("relation", new ArrayList<>());
+        out.put("function", new ArrayList<>());
+        out.put("behavior", new ArrayList<>());
+        for (Map<String, Object> f : fields) {
+            String id = String.valueOf(f.getOrDefault("facet", ""));
+            out.computeIfAbsent(id, k -> new ArrayList<>()).add(f);
+        }
+        return out;
     }
 
     private static String shortName(String iri) {

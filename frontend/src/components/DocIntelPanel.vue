@@ -175,7 +175,7 @@
                 <div class="detail-kicker">
                   <span>{{ kindDisplay(activeNode) }}</span>
                   <span
-                    v-if="activeNode.change && activeNode.change !== 'stable'"
+                    v-if="activeNode.change && activeNode.change !== 'stable' && !activeNode.decisionStatus"
                     class="detail-chg"
                     :class="'c-' + activeNode.change"
                   >{{ changeTypeLabel(activeNode.change) }}</span>
@@ -183,13 +183,147 @@
                 <h2>{{ activeNode.label }}</h2>
                 <p class="detail-iri" v-if="activeNode.iri"><code>{{ activeNode.iri }}</code></p>
 
-                <!-- 属性级变更：改了什么、原值→新值、依据 -->
+                <div class="detail-block">
+                  <h3>当前定义</h3>
+                  <p>{{ activeNode.definition || '暂无定义' }}</p>
+                  <ul class="detail-meta" v-if="activeNode.parentLabel">
+                    <li><span>父类</span>{{ activeNode.parentLabel }}</li>
+                  </ul>
+                </div>
+
+                <!-- 类自身修改对照。新增节点只展示当前定义，不再另开一张原值/新值表 -->
                 <div
                   class="detail-block"
-                  v-if="activeNode.change && activeNode.change !== 'stable'"
+                  v-if="activeNode.change !== 'add' && classLevelFieldDiffs.length"
+                >
+                  <h3>类信息变更</h3>
+                  <table class="diff-table">
+                    <thead>
+                      <tr>
+                        <th style="width:16%">属性</th>
+                        <th style="width:26%">原值</th>
+                        <th style="width:26%">新值</th>
+                        <th>依据</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(d, i) in classLevelFieldDiffs" :key="(d.field || '') + '-' + i">
+                        <td class="diff-field">{{ d.fieldLabel || d.field }}</td>
+                        <td class="diff-before">{{ d.before || '（空）' }}</td>
+                        <td class="diff-after">{{ d.after || '（空）' }}</td>
+                        <td class="diff-basis">{{ d.basis || '—' }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <!-- 完整原有属性 + 行内标记增删改 -->
+                <div class="detail-block" v-if="activeFacetTabs.length">
+                  <h3>全部属性 / 关系</h3>
+                  <p class="facet-hint">下列为该{{ kindDisplay(activeNode) }}原有分面字段；有变更的在本行标注新增 / 修改 / 删除，可用右侧 ✓ / ✕ 局部接受或取消该属性。</p>
+                  <div class="facet-tabs">
+                    <button
+                      v-for="tab in activeFacetTabs"
+                      :key="tab.id"
+                      type="button"
+                      class="facet-tab"
+                      :class="{ active: activeFacetId === tab.id }"
+                      @click="activeFacetId = tab.id"
+                    >
+                      {{ tab.label }}
+                      <b>({{ tab.count }})</b>
+                      <i v-if="tab.changeCount" class="facet-chg-dot" :title="tab.changeCount + ' 项变更'" />
+                    </button>
+                  </div>
+                  <table class="facet-table" v-if="annotatedFacetRows.length">
+                    <thead>
+                      <tr>
+                        <th style="width:10%">状态</th>
+                        <th style="width:16%">字段</th>
+                        <th style="width:11%">类型</th>
+                        <th style="width:13%">单位/编码</th>
+                        <th>定义 / 变更说明</th>
+                        <th style="width:72px">勾差</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr
+                        v-for="row in annotatedFacetRows"
+                        :key="row.key"
+                        :class="{
+                          'row-add': row.change === 'add',
+                          'row-mod': row.change === 'modify',
+                          'row-del': row.change === 'delete'
+                        }"
+                      >
+                        <td>
+                          <span v-if="row.change && !row.decisionStatus" class="row-badge" :class="'b-' + row.change">
+                            {{ changeTypeLabel(row.change) }}
+                          </span>
+                          <span v-else class="row-badge b-stable">原有</span>
+                        </td>
+                        <td class="diff-field">{{ row.label }}</td>
+                        <td>{{ row.kind === 'ObjectProperty' ? '对象关系' : '数据属性' }}</td>
+                        <td>
+                          <template v-if="row.showCompare && row.unitChanged">
+                            <span class="diff-before">{{ row.unitBefore || '（空）' }}</span>
+                            →
+                            <span class="diff-after">{{ row.unitAfter || '（空）' }}</span>
+                          </template>
+                          <template v-else>{{ row.unit || row.functionCode || '—' }}</template>
+                        </td>
+                        <td>
+                          <template v-if="row.showCompare">
+                            <div class="inline-diff" v-if="row.defBefore !== row.defAfter">
+                              <span class="diff-before">{{ row.defBefore || '（空）' }}</span>
+                              <span class="diff-arrow">→</span>
+                              <span class="diff-after">{{ row.defAfter || '（空）' }}</span>
+                            </div>
+                            <div v-else>{{ row.definition || '—' }}</div>
+                            <div class="row-basis" v-if="row.basis">依据：{{ row.basis }}</div>
+                          </template>
+                          <template v-else-if="row.change === 'add'">
+                            <div>{{ row.definition || '—' }}</div>
+                            <div class="row-basis" v-if="row.basis">依据：{{ row.basis }}</div>
+                          </template>
+                          <template v-else-if="row.change === 'delete'">
+                            <div class="def-del">{{ row.definition || '—' }}</div>
+                            <div class="row-basis" v-if="row.basis">依据：{{ row.basis }}</div>
+                          </template>
+                          <template v-else>{{ row.definition || '—' }}</template>
+                        </td>
+                        <td class="row-decide">
+                          <template v-if="row.candidateId && row.change">
+                            <button
+                              type="button"
+                              class="row-icon-btn ok"
+                              title="接受该属性变更"
+                              :disabled="busy"
+                              @click="acceptFacetRow(row)"
+                            >✓</button>
+                            <button
+                              type="button"
+                              class="row-icon-btn no"
+                              title="取消该属性变更"
+                              :disabled="busy"
+                              @click="rejectFacetRow(row)"
+                            >✕</button>
+                          </template>
+                          <span v-else class="row-decide-empty">—</span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <p v-else class="diff-fallback">该分面暂无字段。</p>
+                </div>
+
+                <!-- 无分面时的属性级对照；新增只保留上方当前定义 -->
+                <div
+                  class="detail-block"
+                  v-else-if="activeNode.change && activeNode.change !== 'add' && activeNode.change !== 'stable' && activeFieldDiffs.length"
                 >
                   <h3>{{ diffSectionTitle }}</h3>
-                  <table class="diff-table" v-if="activeFieldDiffs.length">
+                  <table class="diff-table">
                     <thead>
                       <tr>
                         <th style="width:16%">属性</th>
@@ -207,10 +341,9 @@
                       </tr>
                     </tbody>
                   </table>
-                  <p v-else class="diff-fallback">暂无字段对照，请查看下方证据或刷新树。</p>
                 </div>
 
-                <div class="detail-block" v-if="activeEvidence.length">
+                <div class="detail-block" v-if="activeEvidence.length && !activeFacetTabs.length">
                   <h3>证据来源</h3>
                   <ul class="ev-list">
                     <li v-for="ev in activeEvidence" :key="ev.id || ev.excerpt">
@@ -220,15 +353,10 @@
                   </ul>
                 </div>
 
-                <div class="detail-block" v-if="!activeNode.change || activeNode.change === 'stable'">
-                  <h3>当前定义</h3>
-                  <p>{{ activeNode.definition || '暂无定义' }}</p>
-                  <ul class="detail-meta" v-if="activeNode.parentLabel">
-                    <li><span>父类</span>{{ activeNode.parentLabel }}</li>
-                  </ul>
-                </div>
-
-                <div class="detail-actions" v-if="activeNode.candidateId && activeNode.change && activeNode.change !== 'stable'">
+                <div
+                  class="detail-actions"
+                  v-if="activeNode.candidateId && activeNode.change && activeNode.change !== 'stable' && !activeNode.decisionStatus"
+                >
                   <button type="button" class="btn primary" :disabled="busy" @click="acceptNode(activeNode)">接受变更</button>
                   <button type="button" class="btn ghost" :disabled="busy" @click="rejectNode(activeNode)">取消变更</button>
                 </div>
@@ -276,10 +404,20 @@ const evidenceLoading = ref(false)
 const structureTree = ref([])
 const structureModels = ref([])
 const structureChanges = ref([])
+const structureDecided = ref([])
 const changeStats = reactive({ add: 0, modify: 0, delete: 0 })
 const selectedChangeIds = ref([])
 const activeNodeId = ref('')
 const activeNode = ref(null)
+const activeFacetId = ref('technicalParam')
+
+const FACET_TAB_DEFS = [
+  { id: 'technicalParam', label: '技术参数' },
+  { id: 'stateVariable', label: '状态变量' },
+  { id: 'relation', label: '关系' },
+  { id: 'function', label: '功能' },
+  { id: 'behavior', label: '行为' }
+]
 
 function showToast(msg, ok = true) {
   toast.value = msg
@@ -353,6 +491,186 @@ const activeFieldDiffs = computed(() => {
   )
 })
 
+/** Resolve facets from node, or inherit from parent metamodel in tree (for 模型). */
+function findNodeFacets(node) {
+  if (!node) return {}
+  if (node.facets && typeof node.facets === 'object') {
+    const has = FACET_TAB_DEFS.some((t) => Array.isArray(node.facets[t.id]) && node.facets[t.id].length)
+    if (has) return node.facets
+  }
+  const parentIri = String(node.parentIri || '')
+  const parentLabel = String(node.parentLabel || '')
+  let found = null
+  const walk = (nodes) => {
+    for (const n of nodes || []) {
+      if ((parentIri && n.iri === parentIri) || (parentLabel && n.label === parentLabel && n.uiRole !== 'model')) {
+        if (n.facets) found = n.facets
+        return
+      }
+      walk(n.children)
+    }
+  }
+  walk(structureTree.value)
+  return found && typeof found === 'object' ? found : {}
+}
+
+const activeFacetMap = computed(() => findNodeFacets(activeNode.value))
+
+function propertyBelongsToActive(c, label, facetIris, map) {
+  const kind = String(c.kind || '')
+  if (!/Property|Relation/i.test(kind)) return false
+  const domain = String(c.domainHint || c.parentLabel || '')
+  if (domain && domain === label) return true
+  const existing = String(c.existingIri || c.acceptedIri || '')
+  if (existing && facetIris.has(existing)) return true
+  const clabel = String(c.label || '')
+  if (clabel) {
+    for (const t of FACET_TAB_DEFS) {
+      if ((map[t.id] || []).some((f) => f.label === clabel)) return true
+    }
+  }
+  return false
+}
+
+/** Property/relation changes (pending + recently decided) for the active class/model. */
+const relatedPropertyChanges = computed(() => {
+  const node = activeNode.value
+  if (!node) return []
+  const label = String(node.label || '')
+  const facetIris = new Set()
+  const map = activeFacetMap.value
+  for (const t of FACET_TAB_DEFS) {
+    for (const f of map[t.id] || []) {
+      if (f.propertyIri) facetIris.add(String(f.propertyIri))
+    }
+  }
+  return (structureChanges.value || []).filter((c) =>
+    propertyBelongsToActive(c, label, facetIris, map)
+  )
+})
+
+function changeFacetId(c) {
+  const id = String(c.uiFacet || '')
+  if (FACET_TAB_DEFS.some((t) => t.id === id)) return id
+  const zh = String(c.facetLabel || '')
+  const hit = FACET_TAB_DEFS.find((t) => t.label === zh)
+  if (hit) return hit.id
+  if (/ObjectProperty|Relation/i.test(String(c.kind || ''))) return 'relation'
+  return 'technicalParam'
+}
+
+function pickDiff(fieldDiffs, field) {
+  const list = Array.isArray(fieldDiffs) ? fieldDiffs : []
+  return list.find((d) => d.field === field) || null
+}
+
+function basisOf(ch) {
+  const diffs = ch?.fieldDiffs || []
+  if (diffs[0]?.basis) return diffs[0].basis
+  const ev = ch?.evidence || []
+  return ev[0]?.excerpt || ''
+}
+
+const annotatedFacetRows = computed(() => {
+  const facetId = activeFacetId.value
+  const base = Array.isArray(activeFacetMap.value[facetId]) ? activeFacetMap.value[facetId] : []
+  const related = relatedPropertyChanges.value.filter((c) => changeFacetId(c) === facetId)
+  const used = new Set()
+  const rows = base.map((f) => {
+    const ch = related.find((c) =>
+      (f.propertyIri && (
+        (c.existingIri && c.existingIri === f.propertyIri)
+        || (c.acceptedIri && c.acceptedIri === f.propertyIri)
+      ))
+      || (c.label && c.label === f.label)
+    )
+    if (ch) used.add(ch.candidateId)
+    const defDiff = ch ? pickDiff(ch.fieldDiffs, 'definition') : null
+    const unitDiff = ch ? (pickDiff(ch.fieldDiffs, 'rangeHint') || pickDiff(ch.fieldDiffs, 'unit')) : null
+    const change = ch?.change || ''
+    const decisionStatus = ch?.decisionStatus || ''
+    const settled = decisionStatus === 'accepted' || decisionStatus === 'rejected'
+    // 修改接受后：新值写回本行，不再保留原值→新值
+    const merged = decisionStatus === 'accepted' && (change === 'modify' || change === 'add')
+    const pending = change && !settled && !merged
+    const defAfter = defDiff ? defDiff.after : (ch?.definition || f.definition || '')
+    const unitAfter = unitDiff ? unitDiff.after : (ch?.rangeHint || f.unit || '')
+    return {
+      key: f.propertyIri || f.label,
+      label: f.label,
+      kind: f.kind || 'DataProperty',
+      unit: merged ? (unitAfter || f.unit || '') : (f.unit || ''),
+      functionCode: f.functionCode || ch?.functionCode || '',
+      definition: merged ? (defAfter || f.definition || '') : (f.definition || ''),
+      change: merged ? '' : (change === 'stable' ? '' : change),
+      decisionStatus: merged ? '' : decisionStatus,
+      showCompare: pending && change === 'modify',
+      defBefore: defDiff ? defDiff.before : (f.definition || ''),
+      defAfter,
+      unitBefore: unitDiff ? unitDiff.before : (f.unit || ''),
+      unitAfter,
+      unitChanged: !!(unitDiff && unitDiff.before !== unitDiff.after),
+      basis: pending ? basisOf(ch) : '',
+      candidateId: pending ? (ch?.candidateId || '') : ''
+    }
+  })
+  // Append 新增 / 删除（若原列表已无该字段）等未挂上的变更
+  for (const ch of related) {
+    if (used.has(ch.candidateId)) continue
+    const change = ch.change || ''
+    if (change !== 'add' && change !== 'delete' && change !== 'modify') continue
+    const defDiff = pickDiff(ch.fieldDiffs, 'definition')
+    const unitDiff = pickDiff(ch.fieldDiffs, 'rangeHint') || pickDiff(ch.fieldDiffs, 'unit')
+    const decisionStatus = ch.decisionStatus || ''
+    const merged = decisionStatus === 'accepted' && change === 'modify'
+    const pending = !decisionStatus && !merged
+    const defAfter = defDiff ? defDiff.after : (ch.definition || '')
+    rows.push({
+      key: change + ':' + (ch.candidateId || ch.label),
+      label: ch.label,
+      kind: /ObjectProperty|Relation/i.test(String(ch.kind || '')) ? 'ObjectProperty' : 'DataProperty',
+      unit: ch.rangeHint || ch.functionCode || '',
+      functionCode: ch.functionCode || '',
+      definition: merged ? defAfter : (ch.definition || ''),
+      change: merged ? '' : change,
+      decisionStatus: merged ? '' : decisionStatus,
+      showCompare: pending && change === 'modify',
+      defBefore: defDiff ? defDiff.before : '',
+      defAfter,
+      unitBefore: unitDiff ? unitDiff.before : '',
+      unitAfter: unitDiff ? unitDiff.after : (ch.rangeHint || ''),
+      unitChanged: !!(unitDiff && unitDiff.before !== unitDiff.after),
+      basis: pending ? basisOf(ch) : '',
+      candidateId: pending ? (ch.candidateId || '') : ''
+    })
+  }
+  return rows
+})
+
+const activeFacetTabs = computed(() => {
+  const map = activeFacetMap.value
+  const related = relatedPropertyChanges.value
+  const tabs = FACET_TAB_DEFS.map((t) => {
+    const baseCount = Array.isArray(map[t.id]) ? map[t.id].length : 0
+    const adds = related.filter((c) => changeFacetId(c) === t.id && c.change === 'add').length
+    const changeCount = related.filter((c) => changeFacetId(c) === t.id).length
+    return {
+      ...t,
+      count: baseCount + adds,
+      changeCount
+    }
+  })
+  return tabs.some((t) => t.count > 0 || t.changeCount > 0) ? tabs : []
+})
+
+/** Class-level diffs only (名称/定义/父类/角色)，不含属性字段对照 */
+const classLevelFieldDiffs = computed(() => {
+  const kind = String(activeNode.value?.kind || '')
+  if (/Property|Relation/i.test(kind)) return []
+  const allow = new Set(['label', 'definition', 'parentLabel', 'uiRole', 'match'])
+  return (activeFieldDiffs.value || []).filter((d) => allow.has(String(d.field || '')))
+})
+
 function synthesizeFieldDiffs(node, cand, change, evidence) {
   if (!node || !node.change || node.change === 'stable') return []
   const c = cand || change || {}
@@ -411,10 +729,23 @@ function onActivateNode(node) {
           : (ch.evidence || []),
         change: node.change || ch.change,
         definition: node.definition || ch.definition,
-        parentLabel: node.parentLabel || ch.parentLabel
+        parentLabel: node.parentLabel || ch.parentLabel,
+        facets: node.facets || {}
       }
     : node
   activeNodeId.value = node?.id || ''
+  // Prefer tab with property changes, else first non-empty facet
+  const facets = findNodeFacets(activeNode.value)
+  const related = (structureChanges.value || []).filter((c) => {
+    const kind = String(c.kind || '')
+    if (!/Property|Relation/i.test(kind)) return false
+    return String(c.domainHint || c.parentLabel || '') === String(activeNode.value?.label || '')
+  })
+  const withChg = FACET_TAB_DEFS.find((t) =>
+    related.some((c) => changeFacetId(c) === t.id)
+  )
+  const first = FACET_TAB_DEFS.find((t) => Array.isArray(facets[t.id]) && facets[t.id].length)
+  activeFacetId.value = (withChg || first)?.id || 'technicalParam'
   if (cid) {
     const cand = data.candidates.find((c) => c.id === cid)
     if (cand) selectCandidate(cand)
@@ -429,6 +760,7 @@ async function loadStructureReview() {
     structureTree.value = res.tree || []
     structureModels.value = res.models || []
     structureChanges.value = res.changes || []
+    structureDecided.value = res.decided || []
     changeStats.add = res.changeStats?.add ?? 0
     changeStats.modify = res.changeStats?.modify ?? 0
     changeStats.delete = res.changeStats?.delete ?? 0
@@ -440,15 +772,40 @@ async function loadStructureReview() {
   }
 }
 
+function findTreeNodeById(id, nodes = structureTree.value) {
+  if (!id) return null
+  for (const n of nodes || []) {
+    if (n.id === id) return n
+    const hit = findTreeNodeById(id, n.children)
+    if (hit) return hit
+  }
+  // models pane entries
+  const m = (structureModels.value || []).find((x) => x.id === id)
+  return m || null
+}
+
 async function decideBatch(ids, decision) {
   if (!props.projectId || !ids?.length) return
   busy.value = true
   error.value = ''
+  const keepNodeId = activeNodeId.value
+  const keepFacet = activeFacetId.value
   try {
     const res = await api.decideDocIntelBatch(props.projectId, ids, decision)
     await reload()
     await loadStructureReview()
     selectedChangeIds.value = []
+    // Stay on the same class/model detail so property勾差 feels local
+    if (keepNodeId) {
+      const node = findTreeNodeById(keepNodeId)
+      if (node) {
+        onActivateNode(node)
+        if (keepFacet) activeFacetId.value = keepFacet
+      } else {
+        activeNode.value = null
+        activeNodeId.value = ''
+      }
+    }
     showToast(res.message || (decision === 'accept' ? '已接受' : '已取消'), !!res.ok)
   } catch (e) {
     error.value = e.message || String(e)
@@ -484,6 +841,16 @@ async function rejectNode(node) {
   const id = nodeCandidateId(node)
   if (!id) return
   await decideBatch([id], 'reject')
+}
+
+/** Property/relation row-level accept|reject (局部勾差). */
+async function acceptFacetRow(row) {
+  if (!row?.candidateId) return
+  await decideBatch([row.candidateId], 'accept')
+}
+async function rejectFacetRow(row) {
+  if (!row?.candidateId) return
+  await decideBatch([row.candidateId], 'reject')
 }
 
 function openModeling() {
@@ -656,7 +1023,7 @@ async function seedDemo() {
     applySnapshot((await api.seedDocIntelDemo(props.projectId)) || {})
     activeTab.value = 'review'
     await loadStructureReview()
-    showToast('示范已写入。请打开结构审核 →「模型管理」：可见武装直升机(新增)、运输直升机(修改)、侦察直升机(删除)。', true)
+    showToast('示范已写入。点「直升机」可验五类分面；「模型管理」可见型号增删改。', true)
   } catch (e) {
     error.value = e.message || String(e)
   } finally {
@@ -991,6 +1358,8 @@ watch(activeTab, (tab) => {
 .detail-chg.c-add { color: #166534; background: #dcfce7; }
 .detail-chg.c-modify { color: #92400e; background: #fde68a; }
 .detail-chg.c-delete { color: #991b1b; background: #fecaca; }
+.detail-chg.c-accepted { color: #166534; background: #dcfce7; }
+.detail-chg.c-rejected { color: #64748b; background: #f1f5f9; }
 .detail-panel h2 {
   margin: 0 0 8px;
   font-size: 20px;
@@ -1058,6 +1427,126 @@ watch(activeTab, (tab) => {
   font-size: 13px;
   color: #94a3b8;
 }
+.facet-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.facet-tab {
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #475569;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.facet-tab b {
+  margin-left: 4px;
+  font-weight: 700;
+  color: #2563eb;
+}
+.facet-tab.active {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+}
+.facet-tab.active b { color: #dbeafe; }
+.facet-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.facet-table th,
+.facet-table td {
+  border: 1px solid #e2e8f0;
+  padding: 7px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+.facet-table th {
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+}
+.facet-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.45;
+}
+.facet-chg-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: #f59e0b;
+  vertical-align: middle;
+}
+.facet-tab.active .facet-chg-dot { background: #fde68a; }
+.row-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.row-badge.b-stable { color: #64748b; background: #f1f5f9; font-weight: 600; }
+.row-badge.b-add { color: #166534; background: #dcfce7; }
+.row-badge.b-modify { color: #92400e; background: #fde68a; }
+.row-badge.b-delete { color: #991b1b; background: #fecaca; }
+.row-badge.b-accepted { color: #166534; background: #dcfce7; }
+.row-badge.b-rejected { color: #64748b; background: #f1f5f9; }
+.facet-table tr.row-add { background: #f0fdf4; }
+.facet-table tr.row-mod { background: #fffbeb; }
+.facet-table tr.row-del { background: #fef2f2; }
+.facet-table tr.row-del .diff-field,
+.facet-table tr.row-del .def-del { text-decoration: line-through; color: #94a3b8; }
+.inline-diff {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 6px;
+  line-height: 1.45;
+}
+.diff-arrow { color: #94a3b8; flex-shrink: 0; }
+.row-basis {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.4;
+}
+.row-decide {
+  white-space: nowrap;
+  text-align: center;
+  vertical-align: middle;
+}
+.row-decide-empty {
+  color: #cbd5e1;
+  font-size: 12px;
+}
+.row-icon-btn {
+  width: 26px;
+  height: 26px;
+  margin: 0 1px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.row-icon-btn.ok { color: #15803d; }
+.row-icon-btn.no { color: #b91c1c; }
+.row-icon-btn:hover:not(:disabled) { background: #f1f5f9; }
+.row-icon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .ev-list {
   list-style: none;
   margin: 0;

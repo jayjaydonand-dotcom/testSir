@@ -152,6 +152,7 @@ function stripModels(node) {
 }
 
 function isPending(m) {
+  if (m?.decisionStatus === 'accepted' || m?.decisionStatus === 'rejected') return false
   return m?.change === 'add' || m?.change === 'modify' || m?.change === 'delete'
 }
 
@@ -407,6 +408,8 @@ const filteredModels = computed(() => {
 .tree-badge.add-badge { color: #166534; background: #dcfce7; border: 1px solid #86efac; }
 .tree-badge.mod-badge { color: #92400e; background: #fef3c7; border: 1px solid #fcd34d; }
 .tree-badge.del-badge { color: #991b1b; background: #fee2e2; border: 1px solid #fca5a5; }
+.tree-badge.ok-badge { color: #166534; background: #dcfce7; border: 1px solid #86efac; }
+.tree-badge.no-badge { color: #64748b; background: #f1f5f9; border: 1px solid #e2e8f0; }
 .tree-decide { display: inline-flex; gap: 1px; margin-left: auto; }
 .tree-icon-btn {
   width: 24px; height: 24px; border: none; border-radius: 6px; background: transparent;

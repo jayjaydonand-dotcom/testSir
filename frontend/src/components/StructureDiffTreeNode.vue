@@ -96,7 +96,10 @@ defineEmits(['toggle-select', 'activate', 'accept', 'reject'])
 const open = ref(true)
 const hasChildren = computed(() => Array.isArray(props.node.children) && props.node.children.length > 0)
 const change = computed(() => String(props.node.change || 'stable'))
-const isPendingChange = computed(() => ['add', 'modify', 'delete'].includes(change.value))
+const isPendingChange = computed(() =>
+  ['add', 'modify', 'delete'].includes(change.value)
+  && !['accepted', 'rejected'].includes(String(props.node.decisionStatus || ''))
+)
 const isSelected = computed(() => {
   const id = props.node.candidateId || props.node.id
   return props.selectedIds.includes(id)
@@ -198,6 +201,16 @@ const displayLabel = computed(() => String(props.node.label || ''))
   color: #991b1b;
   background: #fee2e2;
   border: 1px solid #fca5a5;
+}
+.tree-badge.ok-badge {
+  color: #166534;
+  background: #dcfce7;
+  border: 1px solid #86efac;
+}
+.tree-badge.no-badge {
+  color: #64748b;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
 }
 .tree-badge.data-badge {
   color: #0f766e;
