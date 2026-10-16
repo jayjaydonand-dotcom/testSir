@@ -161,6 +161,7 @@
             <div class="tree-panel scroll">
               <StructureDiffTree
                 :roots="structureTree"
+                :models="structureModels"
                 :selected-ids="selectedChangeIds"
                 :active-id="activeNodeId"
                 @toggle-select="toggleChangeSelect"
@@ -172,7 +173,7 @@
             <aside class="detail-panel">
               <div class="detail-panel-inner scroll" v-if="activeNode">
                 <div class="detail-kicker">
-                  <span>{{ activeNode.kind || 'Class' }}</span>
+                  <span>{{ kindDisplay(activeNode) }}</span>
                   <span
                     v-if="activeNode.change && activeNode.change !== 'stable'"
                     class="detail-chg"
@@ -182,36 +183,56 @@
                 <h2>{{ activeNode.label }}</h2>
                 <p class="detail-iri" v-if="activeNode.iri"><code>{{ activeNode.iri }}</code></p>
 
-                <template v-if="activeCand">
-                  <div class="detail-block">
-                    <h3>定义</h3>
-                    <p>{{ activeCand.definition || activeNode.definition || '暂无定义' }}</p>
-                  </div>
-                  <div class="detail-block" v-if="activeCand.parentLabel || activeCand.existingIri || activeCand.action">
-                    <h3>挂接信息</h3>
-                    <ul class="detail-meta">
-                      <li v-if="activeCand.action"><span>动作</span>{{ activeCand.action }}</li>
-                      <li v-if="activeCand.parentLabel"><span>父类</span>{{ activeCand.parentLabel }}</li>
-                      <li v-if="activeCand.existingIri"><span>已有 IRI</span><code>{{ activeCand.existingIri }}</code></li>
-                    </ul>
-                  </div>
-                  <div class="detail-block">
-                    <h3>公理预览</h3>
-                    <pre class="owl-mini">{{ previewOwl(activeCand) }}</pre>
-                  </div>
-                  <div class="detail-actions" v-if="activeCand.status === 'pending'">
-                    <button type="button" class="btn primary" :disabled="busy" @click="acceptNode(activeNode)">接受变更</button>
-                    <button type="button" class="btn ghost" :disabled="busy" @click="rejectNode(activeNode)">取消变更</button>
-                  </div>
-                </template>
-                <div v-else class="detail-block muted">
-                  <p>这是现有元模型节点，暂无待审变更。</p>
+                <!-- 属性级变更：改了什么、原值/新值、依据 -->
+                <div class="detail-block" v-if="activeFieldDiffs.length">
+                  <h3>{{ activeNode.change === 'modify' ? '修改了哪些属性' : (activeNode.change === 'add' ? '将写入的属性' : '将删除的属性') }}</h3>
+                  <table class="diff-table">
+                    <thead>
+                      <tr>
+                        <th>属性</th>
+                        <th>原值</th>
+                        <th>新值</th>
+                        <th>依据（文档摘录）</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(d, i) in activeFieldDiffs" :key="d.field + '-' + i">
+                        <td class="diff-field">{{ d.fieldLabel || d.field }}</td>
+                        <td class="diff-before">{{ d.before }}</td>
+                        <td class="diff-after">{{ d.after }}</td>
+                        <td class="diff-basis">{{ d.basis }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="detail-block" v-if="activeEvidence.length">
+                  <h3>证据来源</h3>
+                  <ul class="ev-list">
+                    <li v-for="ev in activeEvidence" :key="ev.id || ev.excerpt">
+                      <span v-if="ev.page" class="ev-page">第 {{ ev.page }} 页</span>
+                      <q>{{ ev.excerpt }}</q>
+                    </li>
+                  </ul>
+                </div>
+
+                <div class="detail-block" v-if="!activeFieldDiffs.length && !activeNode.change">
+                  <h3>当前定义</h3>
+                  <p>{{ activeNode.definition || '暂无定义' }}</p>
+                  <ul class="detail-meta" v-if="activeNode.parentLabel">
+                    <li><span>父类</span>{{ activeNode.parentLabel }}</li>
+                  </ul>
+                </div>
+
+                <div class="detail-actions" v-if="activeNode.candidateId && activeNode.change && activeNode.change !== 'stable'">
+                  <button type="button" class="btn primary" :disabled="busy" @click="acceptNode(activeNode)">接受变更</button>
+                  <button type="button" class="btn ghost" :disabled="busy" @click="rejectNode(activeNode)">取消变更</button>
                 </div>
               </div>
               <div v-else class="detail-empty">
                 <div class="detail-empty-card">
-                  <strong>选择树中的节点</strong>
-                  <p>查看定义、挂接关系与公理预览；对待审项可直接接受或取消。</p>
+                  <strong>选择左侧节点</strong>
+                  <p>左侧与「元模型管理 / 模型管理」相同；点选后查看新增、删除，或修改了哪些属性及文档依据。</p>
                 </div>
               </div>
             </aside>
@@ -249,6 +270,7 @@ const evidenceList = ref([])
 const evidenceLoading = ref(false)
 
 const structureTree = ref([])
+const structureModels = ref([])
 const structureChanges = ref([])
 const changeStats = reactive({ add: 0, modify: 0, delete: 0 })
 const selectedChangeIds = ref([])
@@ -272,9 +294,37 @@ function changeTypeLabel(c) {
   return ({ add: '新增', modify: '修改', delete: '删除' })[c] || c
 }
 
+function kindDisplay(node) {
+  if (!node) return ''
+  if (node.kind === 'Model' || node.uiRole === 'model') return '模型'
+  if (/Property|Relation/i.test(String(node.kind || ''))) return node.kind
+  if (node.kind === 'Folder') return '分组'
+  return '元模型'
+}
+
 const pendingChangeIds = computed(() =>
   (structureChanges.value || []).map((c) => c.candidateId).filter(Boolean)
 )
+
+const activeChange = computed(() => {
+  const cid = activeNode.value?.candidateId
+  if (!cid) return null
+  return (structureChanges.value || []).find((c) => c.candidateId === cid) || null
+})
+
+const activeFieldDiffs = computed(() => {
+  const fromNode = activeNode.value?.fieldDiffs
+  if (Array.isArray(fromNode) && fromNode.length) return fromNode
+  const fromCh = activeChange.value?.fieldDiffs
+  return Array.isArray(fromCh) ? fromCh : []
+})
+
+const activeEvidence = computed(() => {
+  const fromNode = activeNode.value?.evidence
+  if (Array.isArray(fromNode) && fromNode.length) return fromNode
+  const fromCh = activeChange.value?.evidence
+  return Array.isArray(fromCh) ? fromCh : []
+})
 
 const activeCand = computed(() => {
   const cid = activeNode.value?.candidateId
@@ -304,6 +354,7 @@ async function loadStructureReview() {
   try {
     const res = await api.getDocIntelStructureReview(props.projectId)
     structureTree.value = res.tree || []
+    structureModels.value = res.models || []
     structureChanges.value = res.changes || []
     changeStats.add = res.changeStats?.add ?? 0
     changeStats.modify = res.changeStats?.modify ?? 0
@@ -654,6 +705,8 @@ watch(() => props.projectId, (id) => {
   } else {
     applySnapshot({})
     structureTree.value = []
+    structureModels.value = []
+    structureChanges.value = []
     structureChanges.value = []
     error.value = ''
     selectedId.value = ''
@@ -903,6 +956,60 @@ watch(activeTab, (tab) => {
   line-height: 1.55;
 }
 .detail-block.muted p { color: #94a3b8; }
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.diff-table th,
+.diff-table td {
+  border: 1px solid #e2e8f0;
+  padding: 8px 10px;
+  vertical-align: top;
+  text-align: left;
+}
+.diff-table th {
+  background: #f8fafc;
+  color: #64748b;
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.diff-field { font-weight: 600; color: #0f172a; width: 18%; }
+.diff-before { color: #94a3b8; width: 22%; word-break: break-word; }
+.diff-after { color: #0f172a; width: 22%; word-break: break-word; font-weight: 500; }
+.diff-basis { color: #475569; font-size: 12px; word-break: break-word; }
+.ev-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.ev-list li {
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #eef2f7;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #334155;
+  line-height: 1.5;
+}
+.ev-page {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #2563eb;
+  background: #eff6ff;
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-right: 8px;
+}
+.ev-list q {
+  quotes: "「" "」";
+  color: #475569;
+}
 .detail-meta {
   list-style: none;
   margin: 0;
