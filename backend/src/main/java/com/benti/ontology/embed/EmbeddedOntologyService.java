@@ -1,5 +1,6 @@
 package com.benti.ontology.embed;
 
+import com.benti.ontology.util.ProjectListOrders;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import edu.stanford.bmir.protege.web.server.api.ActionExecutor;
 import edu.stanford.bmir.protege.web.server.dispatch.actions.AddAxiomsAction;
@@ -118,6 +119,7 @@ public class EmbeddedOntologyService {
             for (Map<String, Object> item : list) {
                 normalized.add(normalizeProjectMap(item));
             }
+            ProjectListOrders.sortByCreatedAtDesc(normalized);
             return normalized;
         } catch (Exception e) {
             throw wrap("listProjects", e);

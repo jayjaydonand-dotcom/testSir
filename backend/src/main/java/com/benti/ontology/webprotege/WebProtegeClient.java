@@ -1,6 +1,7 @@
 package com.benti.ontology.webprotege;
 
 import com.benti.ontology.config.WebProtegeProperties;
+import com.benti.ontology.util.ProjectListOrders;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.*;
@@ -12,6 +13,7 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -39,7 +41,13 @@ public class WebProtegeClient {
     public List<Map<String, Object>> listProjects() {
         JsonNode node = getJson("/data/projects");
         if (node != null && node.isArray()) {
-            return objectMapper.convertValue(node, List.class);
+            List<Map<String, Object>> list = objectMapper.convertValue(node, List.class);
+            if (list == null) {
+                return Collections.emptyList();
+            }
+            List<Map<String, Object>> copy = new ArrayList<>(list);
+            ProjectListOrders.sortByCreatedAtDesc(copy);
+            return copy;
         }
         return Collections.emptyList();
     }

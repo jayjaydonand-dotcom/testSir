@@ -688,32 +688,6 @@ body {
   padding-top: 12px;
   border-top: 1px solid #f1f5f9;
 }
-.card-stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px solid #f1f5f9;
-}
-.card-stats div {
-  min-width: 0;
-  text-align: center;
-}
-.card-stats b {
-  display: block;
-  font-size: 18px;
-  font-weight: 700;
-  color: #64748b;
-  line-height: 1.2;
-}
-.card-stats span {
-  display: block;
-  margin-top: 4px;
-  font-size: 11px;
-  color: #94a3b8;
-  white-space: nowrap;
-}
 .card-meta {
   display: flex;
   align-items: center;

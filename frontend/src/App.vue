@@ -257,11 +257,6 @@
             </div>
           </header>
           <p class="card-desc">{{ p.description || '暂无描述' }}</p>
-          <footer class="card-stats">
-            <div><b>{{ cardStat(p, 'meta') }}</b><span>元模型数量</span></div>
-            <div><b>{{ cardStat(p, 'model') }}</b><span>模型数量</span></div>
-            <div><b>{{ cardStat(p, 'case') }}</b><span>案例数量</span></div>
-          </footer>
         </article>
       </div>
       <p v-else class="domain-empty">
@@ -581,18 +576,6 @@ function hashName(text) {
 function cardTone(p) {
   if (p && p.inTrash) return 'tone-muted'
   return CARD_TONES[hashName(p && (p.displayName || pidOf(p))) % CARD_TONES.length]
-}
-
-/** Prefer real counts from API when present; otherwise show em dash. */
-function cardStat(p, key) {
-  if (!p || p.inTrash) return '—'
-  const map = {
-    meta: p.metamodelCount ?? p.metaModelCount ?? p.classCount,
-    model: p.modelCount ?? p.instanceCount,
-    case: p.caseCount ?? p.ruleCount
-  }
-  const n = map[key]
-  return n == null || n === '' ? '—' : String(n)
 }
 
 function rememberProject(id) {
