@@ -66,6 +66,27 @@
             </span>
           </label>
 
+          <div class="block extract-opts">
+            <div class="block-head">
+              <h2>抽取模式</h2>
+              <span class="meta">默认框架补全</span>
+            </div>
+            <div class="extract-mode-row">
+              <label class="extract-mode-opt">
+                <input type="radio" value="populate" v-model="extractMode" />
+                <span><b>框架补全</b> — 挂到已有元模型，对齐语义底座；禁止乱建顶层类</span>
+              </label>
+              <label class="extract-mode-opt">
+                <input type="radio" value="open" v-model="extractMode" />
+                <span><b>开放抽取</b> — 允许发明新类（质量依赖人工审核）</span>
+              </label>
+            </div>
+            <label v-if="extractMode === 'populate'" class="extract-mode-check">
+              <input type="checkbox" v-model="allowCreateMetamodel" />
+              允许有限新建元模型子类（仍须挂到已有父类）
+            </label>
+          </div>
+
           <div class="block">
             <div class="block-head">
               <h2>资料库</h2>
@@ -127,7 +148,7 @@
         </div>
 
         <!-- 元模型结构差审核 -->
-        <div v-else class="pane pane-ontology">
+        <div v-else-if="activeTab === 'review'" class="pane pane-ontology">
           <div class="struct-toolbar">
             <div class="struct-toolbar-left">
               <h2>结构审核</h2>
@@ -370,6 +391,27 @@
             </aside>
           </div>
         </div>
+
+        <div v-else-if="activeTab === 'intake'" class="pane pane-docs">
+          <div class="block">
+            <div class="block-head">
+              <h2>待收录</h2>
+              <span class="meta">{{ intakeItems.length }} 条 · 先进入语义底座，不写本体</span>
+            </div>
+            <p class="blank" v-if="!intakeItems.length">文档里对不上骨架和底座的词会出现在这里。确认后收录为术语或指标，下次抽取才能当约束用。</p>
+            <div v-else class="rows">
+              <div v-for="item in intakeItems" :key="item.id" class="row">
+                <div class="row-text">
+                  <div class="row-title">{{ item.label }}</div>
+                  <div class="row-sub">{{ item.kind }} · {{ item.definition || '暂无定义' }}</div>
+                </div>
+                <button type="button" class="btn ghost sm" :disabled="busy" @click="promoteIntake(item, 'term')">收录为术语</button>
+                <button type="button" class="btn ghost sm" :disabled="busy" @click="promoteIntake(item, 'indicator')">收录为指标</button>
+                <button type="button" class="btn ghost sm" :disabled="busy" @click="dismissIntake(item)">忽略</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -387,7 +429,8 @@ const props = defineProps({
 const pipeline = [
   { id: 'docs', label: '文档解析' },
   { id: 'chunks', label: '原文分块' },
-  { id: 'review', label: '结构审核' }
+  { id: 'review', label: '结构审核' },
+  { id: 'intake', label: '待收录' }
 ]
 
 const activeTab = ref('docs')
@@ -400,6 +443,9 @@ const filterStatus = ref('pending')
 const selectedId = ref('')
 const evidenceList = ref([])
 const evidenceLoading = ref(false)
+/** Default: framework populate (not open invent). */
+const extractMode = ref('populate')
+const allowCreateMetamodel = ref(false)
 
 const structureTree = ref([])
 const structureModels = ref([])
@@ -667,7 +713,7 @@ const activeFacetTabs = computed(() => {
 const classLevelFieldDiffs = computed(() => {
   const kind = String(activeNode.value?.kind || '')
   if (/Property|Relation/i.test(kind)) return []
-  const allow = new Set(['label', 'definition', 'parentLabel', 'uiRole', 'match'])
+  const allow = new Set(['label', 'definition', 'parentLabel', 'uiRole'])
   return (activeFieldDiffs.value || []).filter((d) => allow.has(String(d.field || '')))
 })
 
@@ -958,6 +1004,7 @@ const stats = computed(() => ({
   docs: data.stats?.docs ?? data.docs.length,
   chunks: data.stats?.chunks ?? data.chunks.length,
   pending: data.stats?.pending ?? data.candidates.filter((c) => c.status === 'pending').length,
+  intake: data.stats?.intake ?? data.candidates.filter((c) => c.status === 'intake').length,
   accepted: data.stats?.accepted ?? data.candidates.filter((c) => c.status === 'accepted').length,
   rejected: data.stats?.rejected ?? data.candidates.filter((c) => c.status === 'rejected').length
 }))
@@ -970,7 +1017,40 @@ const filteredChunks = computed(() => {
 function stepCount(id) {
   if (id === 'docs') return stats.value.docs
   if (id === 'chunks') return stats.value.chunks
+  if (id === 'intake') return stats.value.intake
   return (changeStats.add + changeStats.modify + changeStats.delete) || stats.value.pending
+}
+
+const intakeItems = computed(() => data.candidates.filter((c) => c.status === 'intake'))
+
+async function promoteIntake(item, asKind) {
+  if (!item || !props.projectId) return
+  busy.value = true
+  error.value = ''
+  try {
+    await api.promoteDocIntelIntake(props.projectId, item.id, asKind)
+    await reload()
+    showToast(asKind === 'indicator' ? '已收录为指标' : '已收录为术语', true)
+  } catch (e) {
+    error.value = e.message || String(e)
+    showToast(error.value, false)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function dismissIntake(item) {
+  if (!item || !props.projectId) return
+  busy.value = true
+  try {
+    await api.dismissDocIntelIntake(props.projectId, item.id)
+    await reload()
+    showToast('已忽略', true)
+  } catch (e) {
+    showToast(e.message || String(e), false)
+  } finally {
+    busy.value = false
+  }
 }
 
 function statusLabel(s) {
@@ -1061,12 +1141,19 @@ async function runJob(doc) {
   busy.value = true
   error.value = ''
   try {
-    const payload = await api.startDocIntelJob(props.projectId, doc.id)
+    const payload = await api.startDocIntelJob(props.projectId, doc.id, {
+      extractMode: extractMode.value || 'populate',
+      allowCreateMetamodel: extractMode.value === 'populate' ? !!allowCreateMetamodel.value : true
+    })
     applySnapshot(payload || {})
     activeTab.value = 'review'
     filterStatus.value = 'pending'
     await loadStructureReview()
-    showToast('解析完成，请在结构树中审核新增/修改/删除。', true)
+    const gs = payload?.gateStats || payload?.job?.gateStats
+    const hint = gs
+      ? `（保留 ${gs.kept ?? '?'} / 入 ${gs.input ?? '?'}，强制复用 ${gs.forcedReuse ?? 0}）`
+      : ''
+    showToast('解析完成' + hint + '，请在结构树中审核真实变更。', true)
   } catch (e) {
     error.value = e.message || String(e)
   } finally {
@@ -1863,6 +1950,37 @@ watch(activeTab, (tab) => {
   flex-direction: column;
 }
 
+.extract-opts {
+  margin-bottom: 12px;
+}
+.extract-mode-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.extract-mode-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: #475569;
+  line-height: 1.45;
+  cursor: pointer;
+}
+.extract-mode-opt b {
+  color: #0f172a;
+  font-weight: 600;
+}
+.extract-mode-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: #64748b;
+  cursor: pointer;
+}
 .pane-docs {
   padding: var(--pad);
   gap: var(--gap);

@@ -201,8 +201,28 @@ public class OntologyGateway {
     }
 
     public Object startDocIntelJob(String projectId, String docId) {
+        return startDocIntelJob(projectId, docId, Map.of());
+    }
+
+    public Object startDocIntelJob(String projectId, String docId, Map<String, Object> options) {
         try {
-            return docIntel.startJob(projectId, docId);
+            return docIntel.startJob(projectId, docId, options);
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+    }
+
+    public Object promoteDocIntelIntake(String projectId, String candidateId, String asKind) {
+        try {
+            return docIntel.promoteIntake(projectId, candidateId, asKind);
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+    }
+
+    public Object dismissDocIntelIntake(String projectId, String candidateId) {
+        try {
+            return docIntel.dismissIntake(projectId, candidateId);
         } catch (Exception e) {
             throw new IllegalStateException(e.getMessage(), e);
         }

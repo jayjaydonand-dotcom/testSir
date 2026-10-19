@@ -201,8 +201,35 @@ public class OntologyApiController {
     }
 
     @PostMapping(value = "/doc-intel/jobs", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public Object startDocIntelJob(@RequestBody Map<String, String> body) {
-        return gateway.startDocIntelJob(require(body, "projectId"), require(body, "docId"));
+    public Object startDocIntelJob(@RequestBody Map<String, Object> body) {
+        Map<String, Object> options = new LinkedHashMap<>();
+        if (body != null) {
+            if (body.get("extractMode") != null) {
+                options.put("extractMode", body.get("extractMode"));
+            } else if (body.get("mode") != null) {
+                options.put("extractMode", body.get("mode"));
+            }
+            if (body.get("allowCreateMetamodel") != null) {
+                options.put("allowCreateMetamodel", body.get("allowCreateMetamodel"));
+            }
+            if (body.get("scopeParentIris") != null) {
+                options.put("scopeParentIris", body.get("scopeParentIris"));
+            }
+        }
+        return gateway.startDocIntelJob(require(body, "projectId"), require(body, "docId"), options);
+    }
+
+    @PostMapping(value = "/doc-intel/intake/promote", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public Object promoteDocIntelIntake(@RequestBody Map<String, String> body) {
+        return gateway.promoteDocIntelIntake(
+                require(body, "projectId"),
+                require(body, "candidateId"),
+                str(body, "as"));
+    }
+
+    @PostMapping(value = "/doc-intel/intake/dismiss", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public Object dismissDocIntelIntake(@RequestBody Map<String, String> body) {
+        return gateway.dismissDocIntelIntake(require(body, "projectId"), require(body, "candidateId"));
     }
 
     @PostMapping(value = "/doc-intel/jobs/get", consumes = MediaType.APPLICATION_JSON_VALUE)

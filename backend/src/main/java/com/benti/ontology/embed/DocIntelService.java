@@ -46,17 +46,20 @@ public class DocIntelService {
     private final EmbeddedOntologyService ontology;
     private final DocIntelWorkerClient worker;
     private final OntologyContextPack contextPack;
+    private final ProjectAuxStore auxStore;
 
     public DocIntelService(WebProtegeProperties props,
                            ObjectMapper objectMapper,
                            EmbeddedOntologyService ontology,
                            DocIntelWorkerClient worker,
-                           OntologyContextPack contextPack) {
+                           OntologyContextPack contextPack,
+                           ProjectAuxStore auxStore) {
         this.props = props;
         this.objectMapper = objectMapper;
         this.ontology = ontology;
         this.worker = worker;
         this.contextPack = contextPack;
+        this.auxStore = auxStore;
     }
 
     public Map<String, Object> engines() {
@@ -131,6 +134,10 @@ public class DocIntelService {
     }
 
     public Map<String, Object> startJob(String projectId, String docId) throws Exception {
+        return startJob(projectId, docId, Map.of());
+    }
+
+    public Map<String, Object> startJob(String projectId, String docId, Map<String, Object> options) throws Exception {
         Map<String, Object> store = normalize(projectId, readJson(storePath(projectId)));
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> docs = (List<Map<String, Object>>) store.get("docs");
@@ -140,6 +147,13 @@ public class DocIntelService {
         }
         String jobId = "job." + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         long now = System.currentTimeMillis();
+        Map<String, Object> opts = options == null ? new LinkedHashMap<>() : new LinkedHashMap<>(options);
+        if (!opts.containsKey("extractMode") && !opts.containsKey("mode")) {
+            opts.put("extractMode", "populate");
+        }
+        if (!opts.containsKey("allowCreateMetamodel")) {
+            opts.put("allowCreateMetamodel", false);
+        }
         Map<String, Object> job = new LinkedHashMap<>();
         job.put("id", jobId);
         job.put("docId", docId);
@@ -148,6 +162,8 @@ public class DocIntelService {
         job.put("createdAt", now);
         job.put("updatedAt", now);
         job.put("message", "流水线执行中…");
+        job.put("extractMode", opts.getOrDefault("extractMode", opts.getOrDefault("mode", "populate")));
+        job.put("allowCreateMetamodel", opts.get("allowCreateMetamodel"));
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> jobs = (List<Map<String, Object>>) store.get("jobs");
@@ -156,8 +172,82 @@ public class DocIntelService {
         meta.put("latestJobId", jobId);
         writeJson(storePath(projectId), store);
 
-        Map<String, Object> result = runPipeline(projectId, meta, jobId);
+        Map<String, Object> result = runPipeline(projectId, meta, jobId, opts);
         return result;
+    }
+
+    /**
+     * Move an intake candidate into the semantic base (term or indicator). It does not write OWL.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> promoteIntake(String projectId, String candidateId, String asKind) throws Exception {
+        Map<String, Object> store = normalize(projectId, readJson(storePath(projectId)));
+        List<Map<String, Object>> candidates = (List<Map<String, Object>>) store.get("candidates");
+        Map<String, Object> cand = findById(candidates, candidateId);
+        if (cand == null) {
+            throw new IllegalArgumentException("candidate not found: " + candidateId);
+        }
+        if (!"intake".equals(String.valueOf(cand.get("status")))) {
+            throw new IllegalStateException("only intake candidates can be promoted");
+        }
+        String kind = asKind == null ? "term" : asKind.trim().toLowerCase(Locale.ROOT);
+        if (!"term".equals(kind) && !"indicator".equals(kind)) {
+            throw new IllegalArgumentException("as must be term or indicator");
+        }
+        Map<String, Object> base = auxStore.getSemanticBase(projectId);
+        String label = String.valueOf(cand.getOrDefault("label", "")).trim();
+        String definition = String.valueOf(cand.getOrDefault("definition", "")).trim();
+        String id = ("term".equals(kind) ? "term." : "ind.")
+                + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("id", id);
+        row.put("label", label);
+        row.put("definition", definition);
+        row.put("status", "draft");
+        if ("term".equals(kind)) {
+            row.put("labelEn", "");
+            row.put("category", "待收录");
+            row.put("aliases", List.of());
+            row.put("skosConceptIri", "");
+            ((List<Map<String, Object>>) base.get("terms")).add(row);
+        } else {
+            row.put("code", "");
+            row.put("unit", String.valueOf(cand.getOrDefault("rangeHint", "")));
+            row.put("dataType", "string");
+            row.put("subsystem", "");
+            row.put("termId", "");
+            row.put("constraint", Map.of("required", false));
+            ((List<Map<String, Object>>) base.get("indicators")).add(row);
+        }
+        auxStore.saveSemanticBase(projectId, objectMapper.writeValueAsString(base));
+        cand.put("status", "promoted");
+        cand.put("promotedAs", kind);
+        cand.put("promotedId", id);
+        writeJson(storePath(projectId), store);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("candidateId", candidateId);
+        out.put("promotedAs", kind);
+        out.put("semanticId", id);
+        return out;
+    }
+
+    public Map<String, Object> dismissIntake(String projectId, String candidateId) throws Exception {
+        Map<String, Object> store = normalize(projectId, readJson(storePath(projectId)));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> candidates = (List<Map<String, Object>>) store.get("candidates");
+        Map<String, Object> cand = findById(candidates, candidateId);
+        if (cand == null) {
+            throw new IllegalArgumentException("candidate not found: " + candidateId);
+        }
+        cand.put("status", "rejected");
+        cand.put("gateReason", "intake-dismissed");
+        writeJson(storePath(projectId), store);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("candidateId", candidateId);
+        out.put("status", "rejected");
+        return out;
     }
 
     public Map<String, Object> getJob(String projectId, String jobId) {
@@ -580,7 +670,6 @@ public class DocIntelService {
             if (!"pending".equals(String.valueOf(cand.get("status")))) {
                 continue;
             }
-            pendingOnly.add(cand);
             String kind = String.valueOf(cand.getOrDefault("kind", "Class"));
             String label = String.valueOf(cand.getOrDefault("label", "")).trim();
             String action = String.valueOf(cand.getOrDefault("action", "")).trim().toLowerCase(Locale.ROOT);
@@ -617,12 +706,23 @@ public class DocIntelService {
                         ? entityByIri.get(existingIri)
                         : entityByIri.get(labelToIri.getOrDefault(label, ""));
                 fieldDiffs = buildFieldDiffs(existing, cand, evidence);
+                // Reuse with no real field differences: treat as stable (not a user-facing modify)
+                if (fieldDiffs.isEmpty()) {
+                    changeType = "stable";
+                }
             } else if ("add".equals(changeType)) {
                 fieldDiffs = buildAddFieldPreview(cand, evidence);
             } else if ("delete".equals(changeType)) {
                 Map<String, Object> existing = entityByIri.get(existingIri);
                 fieldDiffs = buildDeleteFieldPreview(existing != null ? existing : cand, evidence);
             }
+
+            // Identical reuse stays in the candidate store for audit, but is omitted from
+            // structure-review changes / tree overlays / modify counts.
+            if ("stable".equals(changeType)) {
+                continue;
+            }
+            pendingOnly.add(cand);
 
             Map<String, Object> ch = new LinkedHashMap<>();
             ch.put("candidateId", cand.get("id"));
@@ -807,11 +907,20 @@ public class DocIntelService {
         return "";
     }
 
+    /** Trim, collapse whitespace, normalize full-width spaces for equality checks. */
+    private static String normalizeForCompare(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String s = raw.replace('\u3000', ' ').trim().replaceAll("\\s+", " ");
+        return s;
+    }
+
     private static void addFieldDiff(List<Map<String, Object>> diffs, String field, String fieldLabel,
                                      String before, String after, String basis) {
         String b = before == null ? "" : before.trim();
         String a = after == null ? "" : after.trim();
-        if (b.equals(a)) {
+        if (normalizeForCompare(b).equals(normalizeForCompare(a))) {
             return;
         }
         Map<String, Object> row = new LinkedHashMap<>();
@@ -821,6 +930,16 @@ public class DocIntelService {
         row.put("after", a.isBlank() ? "（空）" : a);
         row.put("basis", basis);
         diffs.add(row);
+    }
+
+    private static boolean isPropertyCandidate(Map<String, Object> cand) {
+        if (cand == null) {
+            return false;
+        }
+        String kind = String.valueOf(cand.getOrDefault("kind", "")).trim();
+        return "DataProperty".equalsIgnoreCase(kind)
+                || "ObjectProperty".equalsIgnoreCase(kind)
+                || "Relation".equalsIgnoreCase(kind);
     }
 
     /** Compare existing ontology entity vs candidate for attribute-level modify review. */
@@ -837,21 +956,40 @@ public class DocIntelService {
         String beforeDef = firstNonBlank(ex.get("definition"), ex.get("comment"));
         String afterDef = firstNonBlank(cand.get("definition"), cand.get("comment"));
         addFieldDiff(diffs, "definition", "定义", beforeDef, afterDef, basis);
-        addFieldDiff(diffs, "parentLabel", "所属父类/元模型",
-                String.valueOf(ex.getOrDefault("parentLabel", "")),
-                String.valueOf(cand.getOrDefault("parentLabel", "")), basis);
-        String beforeRole = String.valueOf(ex.getOrDefault("uiRole",
-                "Model".equals(String.valueOf(ex.get("kind"))) ? "model" : "metamodel"))
-                .trim().toLowerCase(Locale.ROOT);
-        String afterRole = isModelCandidate(cand) ? "model"
-                : String.valueOf(cand.getOrDefault("uiRole",
-                "Model".equals(String.valueOf(cand.get("kind"))) ? "model" : "metamodel"))
-                .trim().toLowerCase(Locale.ROOT);
-        if (!beforeRole.equals(afterRole)) {
-            addFieldDiff(diffs, "uiRole", "类别（元模型/模型）",
-                    "model".equals(beforeRole) ? "模型" : "元模型",
-                    "model".equals(afterRole) ? "模型" : "元模型", basis);
+
+        // Prefer IRI equality for parent when both sides have it
+        String beforeParentIri = String.valueOf(ex.getOrDefault("parentIri", "")).trim();
+        String afterParentIri = String.valueOf(cand.getOrDefault("parentIri", "")).trim();
+        if (!beforeParentIri.isBlank() && !afterParentIri.isBlank()) {
+            if (!beforeParentIri.equals(afterParentIri)) {
+                addFieldDiff(diffs, "parentLabel", "所属父类/元模型",
+                        String.valueOf(ex.getOrDefault("parentLabel", beforeParentIri)),
+                        String.valueOf(cand.getOrDefault("parentLabel", afterParentIri)), basis);
+            }
+        } else {
+            addFieldDiff(diffs, "parentLabel", "所属父类/元模型",
+                    String.valueOf(ex.getOrDefault("parentLabel", "")),
+                    String.valueOf(cand.getOrDefault("parentLabel", "")), basis);
         }
+
+        // Class / Model: only label, definition, parent, uiRole (avoid false diffs on property-only fields)
+        if (!isPropertyCandidate(cand)) {
+            String beforeRole = String.valueOf(ex.getOrDefault("uiRole",
+                    "Model".equals(String.valueOf(ex.get("kind"))) ? "model" : "metamodel"))
+                    .trim().toLowerCase(Locale.ROOT);
+            String afterRole = isModelCandidate(cand) ? "model"
+                    : String.valueOf(cand.getOrDefault("uiRole",
+                    "Model".equals(String.valueOf(cand.get("kind"))) ? "model" : "metamodel"))
+                    .trim().toLowerCase(Locale.ROOT);
+            if (!beforeRole.equals(afterRole)) {
+                addFieldDiff(diffs, "uiRole", "类别（元模型/模型）",
+                        "model".equals(beforeRole) ? "模型" : "元模型",
+                        "model".equals(afterRole) ? "模型" : "元模型", basis);
+            }
+            // No synthetic "match" row — empty diffs means content-identical reuse
+            return diffs;
+        }
+
         addFieldDiff(diffs, "domainHint", "定义域提示",
                 String.valueOf(ex.getOrDefault("domainHint", "")),
                 String.valueOf(cand.getOrDefault("domainHint", "")), basis);
@@ -864,15 +1002,6 @@ public class DocIntelService {
         addFieldDiff(diffs, "functionCode", "功能编码",
                 String.valueOf(ex.getOrDefault("functionCode", "")),
                 String.valueOf(cand.getOrDefault("functionCode", "")), basis);
-        if (diffs.isEmpty()) {
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("field", "match");
-            row.put("fieldLabel", "匹配说明");
-            row.put("before", String.valueOf(ex.getOrDefault("label", cand.getOrDefault("label", ""))));
-            row.put("after", "文档命中已有实体（复用，无字段差异）");
-            row.put("basis", basis);
-            diffs.add(row);
-        }
         return diffs;
     }
 
@@ -1550,6 +1679,13 @@ public class DocIntelService {
     @SuppressWarnings("unchecked")
     private Map<String, Object> runPipeline(String projectId, Map<String, Object> meta, String jobId)
             throws Exception {
+        return runPipeline(projectId, meta, jobId, Map.of("extractMode", "populate", "allowCreateMetamodel", false));
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> runPipeline(String projectId, Map<String, Object> meta, String jobId,
+                                            Map<String, Object> options)
+            throws Exception {
         Map<String, Object> store = normalize(projectId, readJson(storePath(projectId)));
         List<Map<String, Object>> jobs = (List<Map<String, Object>>) store.get("jobs");
         Map<String, Object> job = findById(jobs, jobId);
@@ -1561,6 +1697,7 @@ public class DocIntelService {
         List<Map<String, Object>> candidates;
         List<Map<String, Object>> evidence;
         String engineLabel = "ontogpt";
+        Map<String, Object> gateStats = Map.of();
 
         Map<String, Object> workerHealth = worker.health();
         boolean workerOk = Boolean.TRUE.equals(workerHealth.get("reachable"))
@@ -1568,10 +1705,19 @@ public class DocIntelService {
         if (workerOk) {
             try {
                 Map<String, Object> ctx = contextPack.build(projectId);
+                PopulateGates.enrichContext(ctx, options);
                 Map<String, Object> pipe = worker.pipeline(docId, path, fileName, ctx);
                 chunks = listOf(pipe.get("chunks"));
                 candidates = listOf(pipe.get("candidates"));
                 evidence = listOf(pipe.get("evidence"));
+                // Defense in depth: re-apply populate gates server-side
+                Map<String, Object> gated = PopulateGates.apply(candidates, evidence, ctx);
+                candidates = listOf(gated.get("candidates"));
+                evidence = listOf(gated.get("evidence"));
+                Object gs = gated.get("gateStats");
+                if (gs instanceof Map) {
+                    gateStats = (Map<String, Object>) gs;
+                }
                 for (Map<String, Object> c : candidates) {
                     c.putIfAbsent("status", "pending");
                     c.putIfAbsent("docId", docId);
@@ -1581,6 +1727,9 @@ public class DocIntelService {
                 if (job != null) {
                     job.put("engine", engineLabel);
                     job.put("contextStats", ctx.get("stats"));
+                    job.put("extractMode", ctx.get("extractMode"));
+                    job.put("allowCreateMetamodel", ctx.get("allowCreateMetamodel"));
+                    job.put("gateStats", gateStats);
                     job.put("message", String.valueOf(pipe.getOrDefault("message", "worker pipeline ok")));
                 }
             } catch (Exception ex) {
@@ -1652,6 +1801,7 @@ public class DocIntelService {
         out.put("ok", true);
         out.put("job", job);
         out.put("engine", engineLabel);
+        out.put("gateStats", gateStats);
         if (argillaPush != null) {
             out.put("argillaPush", argillaPush);
         }
@@ -1994,6 +2144,7 @@ public class DocIntelService {
         stats.put("chunks", listOf(doc.get("chunks")).size());
         stats.put("candidates", listOf(doc.get("candidates")).size());
         stats.put("pending", countStatus(listOf(doc.get("candidates")), "pending"));
+        stats.put("intake", countStatus(listOf(doc.get("candidates")), "intake"));
         stats.put("accepted", countStatus(listOf(doc.get("candidates")), "accepted"));
         stats.put("rejected", countStatus(listOf(doc.get("candidates")), "rejected"));
         doc.put("stats", stats);

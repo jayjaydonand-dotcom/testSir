@@ -226,8 +226,21 @@ export const uploadDocIntel = async (projectId, file) => {
   return body
 }
 
-export const startDocIntelJob = (projectId, docId) =>
-  postJson('/doc-intel/jobs', { projectId, docId })
+/**
+ * @param {string} projectId
+ * @param {string} docId
+ * @param {{ extractMode?: string, allowCreateMetamodel?: boolean, scopeParentIris?: string[] }} [options]
+ */
+export const startDocIntelJob = (projectId, docId, options = {}) =>
+  postJson('/doc-intel/jobs', {
+    projectId,
+    docId,
+    extractMode: options.extractMode || 'populate',
+    allowCreateMetamodel: !!options.allowCreateMetamodel,
+    ...(Array.isArray(options.scopeParentIris) && options.scopeParentIris.length
+      ? { scopeParentIris: options.scopeParentIris }
+      : {})
+  })
 
 export const getDocIntelJob = (projectId, jobId) =>
   postJson('/doc-intel/jobs/get', { projectId, jobId })
@@ -237,6 +250,12 @@ export const listDocIntelChunks = (projectId, docId) =>
 
 export const listDocIntelCandidates = (projectId, status) =>
   postJson('/doc-intel/candidates/list', { projectId, ...(status ? { status } : {}) })
+
+export const promoteDocIntelIntake = (projectId, candidateId, asKind) =>
+  postJson('/doc-intel/intake/promote', { projectId, candidateId, as: asKind || 'term' })
+
+export const dismissDocIntelIntake = (projectId, candidateId) =>
+  postJson('/doc-intel/intake/dismiss', { projectId, candidateId })
 
 export const decideDocIntelCandidate = (projectId, candidateId, decision, editedLabel) =>
   postJson('/doc-intel/candidates/decide', {
